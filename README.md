@@ -1,61 +1,84 @@
 # Axle
 
-A CLI tool for generating Git commit messages.
+Axle is a command-line tool that helps you write better commit messages using AI. It analyzes your code changes and suggests a commit message in a structured format.
+
+## Features
+
+- 🤖 AI-powered commit message generation using the Qwen2.5-Coder-3B-Instruct model
+- 🔄 Interactive regeneration of commit messages (in-development)
+- 💾 Automatic model caching for faster subsequent runs
+- 🛠️ Configurable generation parameters
+- 📚 Support for conventional commit types and scopes
 
 ## Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/axle.git
-cd axle
-
-# Install in development mode
-pip install -e .
+pip install git+https://github.com/onkardahale/axle.git
 ```
 
 ## Usage
 
+1. Stage your changes:
 ```bash
-# Show version
-axle --version
-
-# Show help
-axle --help
-
-# Generate commit message (coming soon)
-axle
+git add .
 ```
 
-## Development
-
+2. Generate a commit message:
 ```bash
-# Run tests
-python -m unittest discover tests
+axle 
 ```
+
+3. The tool will:
+   - Analyze your staged changes
+   - Generate a commit message
+   - Open your default editor for review
+   - Create the commit if you save and close the editor
+
+## Configuration
+
+The tool uses a configuration file at `~/.cache/axle/model_config.json` with the following structure:
+
+```json
+{
+    "model_name": "Qwen/Qwen2.5-Coder-3B-Instruct",
+    "temperature": 0.7,
+    "max_new_tokens": 200,
+    "top_p": 0.95,
+    "top_k": 50
+}
+```
+
+You can modify these parameters to adjust the generation behavior.
+
+## Commit Message Format
+
+Commit messages are generated in JSON format with the following structure:
+
+```json
+{
+    "type": "feat|fix|docs|style|refactor|test|chore",
+    "scope": "optional-scope",
+    "description": "concise description of changes"
+}
+```
+
+## Requirements
+
+- Python 3.8+
+- Git
+- A text editor (vim, nano, etc.)
+
+## Dependencies
+
+- transformers
+- torch
+- accelerate
+- click
 
 ## License
 
-MIT License
+MIT
 
-## AI Integration
+## Contributing
 
-The project now uses a Hugging Face model for generating commit messages. The model is loaded using the `transformers` library, and it generates commit messages based on the provided git diff.
-
-### Setup
-
-1. Ensure you have the required dependencies installed:
-   ```bash
-   pip install -e .
-   ```
-
-2. The model will be downloaded automatically when you first run the tool.
-
-### Usage
-
-- Run the tool as before, and it will use the Hugging Face model to generate commit messages.
-- If you are not satisfied with the generated message, you can regenerate it by choosing the 'e' option in the interactive prompt.
-
-### Error Handling
-
-- If the model fails to generate a message, an error will be displayed, and the tool will exit with a non-zero status code.
-- Ensure you have a stable internet connection for the initial model download. 
+Contributions are welcome! Please feel free to submit a Pull Request. 
