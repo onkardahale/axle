@@ -1,0 +1,286 @@
+import os
+from typing import Optional, Tuple
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+from transformers.utils import logging
+import json
+from pathlib import Path
+import re # Import the 're' module for regular expressions
+
+# Set tokenizers parallelism to false to avoid warnings
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# Allowed commit types
+ALLOWED_TYPES = ["feat", "fix", "docs", "style", "refactor", "test", "chore"]
+
+class ModelLoadError(Exception):
+    """Raised when there's an error loading the model or tokenizer."""
+    pass
+
+class GenerationError(Exception):
+    """Raised when there's an error during message generation."""
+    pass
+
+class EditorError(Exception):
+    """Raised when there's an error with the editor interaction."""
+    pass
+
+def get_cache_dir() -> Path:
+    """Get the cache directory for models and configurations."""
+    cache_dir = Path.home() / ".cache" / "axle"
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise ModelLoadError(f"Failed to create cache directory: {str(e)}")
+    return cache_dir
+
+def get_model_config() -> dict:
+    """Get the model configuration from cache or return defaults."""
+    config_path = get_cache_dir() / "model_config.json"
+    default_config = {
+        "model_name": "Qwen/Qwen2.5-Coder-3B-Instruct",
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "num_return_sequences": 1
+    }
+    
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            print("Warning: Could not decode model_config.json, using defaults.")
+            return default_config
+    return default_config
+
+def save_model_config(config: dict):
+    """Save the model configuration to cache."""
+    config_path = get_cache_dir() / "model_config.json"
+    try:
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+    except IOError as e:
+        print(f"Warning: Could not save model_config.json: {str(e)}")
+
+
+def get_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
+    """
+    Get the model and tokenizer for commit message generation.
+    
+    Returns:
+        Tuple containing the model and tokenizer
+        
+    Raises:
+        ModelLoadError: If there's an error loading the model or tokenizer
+    """
+    config = get_model_config()
+    model_name = config["model_name"]
+    cache_dir_models = get_cache_dir() / "models"
+    
+    try:
+        logging.set_verbosity_error()
+        
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_name,
+            cache_dir=str(cache_dir_models), # cache_dir expects a string
+            trust_remote_code=True,
+            local_files_only=False
+        )
+        
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            cache_dir=str(cache_dir_models), # cache_dir expects a string
+            trust_remote_code=True,
+            local_files_only=False,
+            torch_dtype=torch.float16,
+            device_map="auto"
+        )
+        # Set padding token if not set, common for generation
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            model.config.pad_token_id = model.config.eos_token_id
+
+        return model, tokenizer
+        
+    except Exception as e:
+        raise ModelLoadError(f"Failed to load model or tokenizer: {str(e)}")
+
+def generate_commit_message(diff: str, scope: Optional[str] = None, regenerate: bool = False) -> str:
+    """
+    Generate a commit message using the model based on the git diff.
+    
+    Args:
+        diff: The git diff content
+        scope: Optional scope of the changes (e.g., directory name)
+        regenerate: Whether to regenerate the message with different parameters
+    
+    Returns:
+        A generated commit message
+        
+    Raises:
+        GenerationError: If there's an error during message generation
+        ValueError: If the diff is empty or invalid
+    """
+    if not diff or not diff.strip():
+        raise ValueError("Diff content cannot be empty")
+    
+    try:
+        model, tokenizer = get_model_and_tokenizer()
+    except ModelLoadError as e:
+        raise GenerationError(f"Model initialization failed: {str(e)}")
+    
+    config = get_model_config()
+    
+    # Construct the messages for chat template
+    messages = [
+        {"role": "system", "content": "You are an expert in Conventional Commits. Your task is to generate commit messages in JSON format based on git diffs."},
+        {"role": "user", "content": f"""Analyze this git diff and generate a commit message in JSON format.
+
+Git diff:
+{diff}
+
+Scope: {scope if scope else 'general'}
+
+Rules:
+1. Return ONLY a JSON object with these fields:
+   - type: one of {', '.join(ALLOWED_TYPES)}
+   - scope: short, lowercase noun or null
+   - description: concise, imperative summary starting with a verb
+
+Example format:
+{{
+    "type": "feat",
+    "scope": "api",
+    "description": "add user authentication endpoint"
+}}
+
+Your response (JSON only):"""}
+    ]
+    
+    try:
+        # Apply chat template
+        text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+        
+        # Tokenize the prompt
+        inputs = tokenizer(text, return_tensors="pt", max_length=4096, truncation=True)
+        
+        if hasattr(model, 'device'):
+            inputs = {k: v.to(model.device) for k, v in inputs.items()}
+        
+        if regenerate:
+            config["temperature"] = min(1.0, config["temperature"] + 0.1) 
+            config["temperature"] = max(0.1, config["temperature"]) 
+            print(f"Regenerating with temperature: {config['temperature']:.2f}") # Feedback for user
+            save_model_config(config)
+        
+        with torch.no_grad():
+            
+            outputs = model.generate(
+                inputs["input_ids"],
+                max_new_tokens=250, # Increased slightly for potentially complex JSON structures or minor verbosity
+                num_return_sequences=config["num_return_sequences"],
+                temperature=config["temperature"],
+                do_sample=True,
+                top_p=config["top_p"],
+                pad_token_id=tokenizer.eos_token_id
+            )
+        
+        # Decode only the newly generated tokens
+        input_length = inputs["input_ids"].shape[1]
+        generated_tokens = outputs[0][input_length:]
+        completion = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+        
+        # ---- Robust JSON Extraction Logic ----
+        extracted_json_string = None
+
+        # 1. Try to find JSON within ```json ... ``` markdown
+        #    Handles optional language specifier (json, JSON) and potential newlines.
+        markdown_match = re.search(r"```(?:json|JSON)?\s*(\{[\s\S]*?\})\s*```", completion, re.IGNORECASE)
+        if markdown_match:
+            extracted_json_string = markdown_match.group(1).strip()
+        else:
+            # 2. If no markdown, try to find the last occurrence of a string that looks like a JSON object
+            last_brace_open_idx = completion.rfind('{')
+            if last_brace_open_idx != -1:
+                # Attempt to find the matching closing brace for the last open brace
+                open_brace_count = 0
+                json_candidate_segment = completion[last_brace_open_idx:]
+                
+                if json_candidate_segment.strip().startswith('{'): # Basic sanity check
+                    end_brace_idx_in_segment = -1
+                    for i, char in enumerate(json_candidate_segment):
+                        if char == '{':
+                            open_brace_count += 1
+                        elif char == '}':
+                            open_brace_count -= 1
+                            if open_brace_count == 0:
+                                end_brace_idx_in_segment = i
+                                break
+                    
+                    if end_brace_idx_in_segment != -1:
+                        extracted_json_string = json_candidate_segment[:end_brace_idx_in_segment+1].strip()
+            
+            # 3. (Optional) As a very last resort, if no specific structure found, 
+            #    and the whole completion might be JSON. Be cautious with this.
+            if extracted_json_string is None:
+                temp_completion_stripped = completion.strip()
+                if temp_completion_stripped.startswith('{') and temp_completion_stripped.endswith('}'):
+                    # Try to parse, it might be a simple JSON output without any wrapping
+                    extracted_json_string = temp_completion_stripped
+        # ---- End of Robust JSON Extraction Logic ----
+
+        if extracted_json_string is None:
+            print(f"Debug: Full model completion (no JSON structure found):\n{completion}")
+            raise GenerationError(f"Could not extract a clear JSON object from the model's output.")
+
+        # For debugging, print what is about to be parsed
+        # print(f"Debug: Attempting to parse as JSON:\n>>>\n{extracted_json_string}\n<<<")
+        
+        try:
+            commit_data = json.loads(extracted_json_string)
+        except json.JSONDecodeError as e:
+            print(f"Debug: Failed to parse JSON:\n{extracted_json_string}")
+            raise GenerationError(f"Failed to parse JSON from model: {str(e)}")
+
+        type_ = commit_data.get("type", "feat")
+        if type_ not in ALLOWED_TYPES:
+            print(f"Warning: Generated type '{type_}' is not in ALLOWED_TYPES. Defaulting to 'feat'.")
+            type_ = "feat" # Default to 'feat' if invalid
+            
+        scope_ = commit_data.get("scope")
+        # Ensure scope is either a non-empty string or None (not an empty string for formatting)
+        if isinstance(scope_, str) and not scope_.strip():
+            scope_ = None
+            
+        description = commit_data.get("description", "").strip()
+        if not description: # Ensure description is not empty
+            print(f"Warning: Generated description is empty. Model output: {commit_data}")
+            raise GenerationError("Generated commit message has an empty description.")
+
+
+        if scope_:
+            commit_message = f"{type_}({scope_}): {description}"
+        else:
+            commit_message = f"{type_}: {description}"
+
+        if not commit_message.strip() or not description : # Final check
+            raise GenerationError("Generated commit message is empty or lacks a description after formatting.")
+
+        return commit_message
+
+    except torch.cuda.OutOfMemoryError:
+        raise GenerationError("GPU out of memory. Try using a smaller model, enabling CPU offloading, or reducing input size.")
+    except Exception as e:
+        # Catch any other unexpected errors during generation steps
+        # Add the current completion to the error message if available
+        current_completion = "N/A"
+        if 'completion' in locals():
+            current_completion = completion
+        elif 'extracted_json_string' in locals() and extracted_json_string is not None:
+            current_completion = extracted_json_string
+
+        raise GenerationError(f"Failed to generate commit message: {str(e)}. Model output snippet: '{current_completion[:200]}...'")
