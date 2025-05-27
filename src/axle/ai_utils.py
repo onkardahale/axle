@@ -306,17 +306,24 @@ def generate_commit_message(
 
         scope_ = commit_data.get("scope")
         description = commit_data.get("description", "").strip()
+        body = commit_data.get("body")
+
         if not description: # Ensure description is not empty
             print(f"Warning: Generated description is empty. Model output: {commit_data}")
             raise GenerationError("Generated commit message has an empty description.")
 
-
         if scope_:
-            commit_message = f"{type_}({scope_}): {description}"
+            header = f"{type_}({scope_}): {description}"
         else:
-            commit_message = f"{type_}: {description}"
+            header = f"{type_}: {description}"
+            
+        commit_message = header
+        
+        # Append body if it exists and is not just whitespace
+        if body and body.strip():
+            commit_message += f"\n\n{body.strip()}" # Two newlines before the body
 
-        if not commit_message.strip() or not description : # Final check
+        if not header.strip() or not description : # Final check
             raise GenerationError("Generated commit message is empty or lacks a description after formatting.")
 
         return commit_message
