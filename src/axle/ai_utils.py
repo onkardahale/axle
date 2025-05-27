@@ -95,6 +95,7 @@ def get_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
             torch_dtype=torch.float16,
             device_map="auto"
         )
+        print(f"Model loaded on device: {model.device}") # Add this line
         # Set padding token if not set, common for generation
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -105,13 +106,23 @@ def get_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     except Exception as e:
         raise ModelLoadError(f"Failed to load model or tokenizer: {str(e)}")
 
-def generate_commit_message(diff: str, scope: Optional[str] = None, regenerate: bool = False) -> str:
+def generate_commit_message(
+    diff: str,
+    scope: Optional[str] = None,
+    context: Optional[list] = None,
+    unanalyzed_files: Optional[list] = None,
+    additional_context: Optional[str] = None,
+    regenerate: bool = False
+) -> str:
     """
     Generate a commit message using the model based on the git diff.
     
     Args:
         diff: The git diff content
         scope: Optional scope of the changes (e.g., directory name)
+        context: Optional list of file analysis from knowledge base
+        unanalyzed_files: Optional list of files that couldn't be analyzed
+        additional_context: Optional user-provided context for regeneration
         regenerate: Whether to regenerate the message with different parameters
     
     Returns:
@@ -131,13 +142,47 @@ def generate_commit_message(diff: str, scope: Optional[str] = None, regenerate: 
     
     config = get_model_config()
     
+    # Construct context section if available
+    context_section = ""
+    if context:
+        context_section = "--- BEGIN AXLE INIT CONTEXT ---\n"
+        for file_analysis in context:
+            context_section += f"File '{file_analysis['path']}' (purposeCategory: {file_analysis['category']}, imports: {file_analysis['imports']}):\n"
+            
+            for class_info in file_analysis['classes']:
+                context_section += f"  Class '{class_info['name']}':\n"
+                if class_info['docstring']:
+                    context_section += f"    Docstring: \"{class_info['docstring']}\"\n"
+                for method in class_info['methods']:
+                    context_section += f"    Method '{method['name']}':\n"
+                    if method['docstring']:
+                        context_section += f"      Docstring: \"{method['docstring']}\"\n"
+                    if method['parameters']:
+                        params = ", ".join(f"{p['name']} ({p['annotation']})" if p['annotation'] else p['name'] for p in method['parameters'])
+                        context_section += f"      Parameters: {params}\n"
+            
+            for func_info in file_analysis['functions']:
+                context_section += f"  Function '{func_info['name']}':\n"
+                if func_info['docstring']:
+                    context_section += f"    Docstring: \"{func_info['docstring']}\"\n"
+                if func_info['parameters']:
+                    params = ", ".join(f"{p['name']} ({p['annotation']})" if p['annotation'] else p['name'] for p in func_info['parameters'])
+                    context_section += f"    Parameters: {params}\n"
+        
+        if unanalyzed_files:
+            context_section += f"The following unanalyzed files were also part of this change: {unanalyzed_files}\n"
+        context_section += "--- END AXLE INIT CONTEXT ---\n\n"
+    
     # Construct the messages for chat template
     messages = [
-        {"role": "system", "content": "You are an expert in Conventional Commits. Your task is to generate commit messages in JSON format based on git diffs."},
+        {"role": "system", "content": "You are an expert in Conventional Commits. Your task is to generate commit messages in JSON format based on git diffs and code context."},
         {"role": "user", "content": f"""Analyze this git diff and generate a commit message in JSON format.
 
-Git diff:
+{context_section}--- BEGIN GIT DIFF ---
 {diff}
+--- END GIT DIFF ---
+
+{additional_context if additional_context else ''}
 
 Scope: {scope if scope else 'general'}
 
@@ -145,7 +190,7 @@ Rules:
 1. Return ONLY a JSON object with these fields:
    - type: one of {', '.join(ALLOWED_TYPES)}
    - scope: short, lowercase noun or null
-   - description: concise, imperative summary starting with a verb
+   - description: concise, imperative summary starting with a verb, not empty
 
 Example format:
 {{
@@ -198,7 +243,6 @@ Your response (JSON only):"""}
         extracted_json_string = None
 
         # 1. Try to find JSON within ```json ... ``` markdown
-        #    Handles optional language specifier (json, JSON) and potential newlines.
         markdown_match = re.search(r"```(?:json|JSON)?\s*(\{[\s\S]*?\})\s*```", completion, re.IGNORECASE)
         if markdown_match:
             extracted_json_string = markdown_match.group(1).strip()
@@ -238,7 +282,7 @@ Your response (JSON only):"""}
             raise GenerationError(f"Could not extract a clear JSON object from the model's output.")
 
         # For debugging, print what is about to be parsed
-        # print(f"Debug: Attempting to parse as JSON:\n>>>\n{extracted_json_string}\n<<<")
+        print(f"Debug: Attempting to parse as JSON:\n>>>\n{extracted_json_string}\n<<<")
         
         try:
             commit_data = json.loads(extracted_json_string)
@@ -248,14 +292,9 @@ Your response (JSON only):"""}
 
         type_ = commit_data.get("type", "feat")
         if type_ not in ALLOWED_TYPES:
-            print(f"Warning: Generated type '{type_}' is not in ALLOWED_TYPES. Defaulting to 'feat'.")
-            type_ = "feat" # Default to 'feat' if invalid
-            
+            type_ = "feat"  # Default to feat if invalid type
+
         scope_ = commit_data.get("scope")
-        # Ensure scope is either a non-empty string or None (not an empty string for formatting)
-        if isinstance(scope_, str) and not scope_.strip():
-            scope_ = None
-            
         description = commit_data.get("description", "").strip()
         if not description: # Ensure description is not empty
             print(f"Warning: Generated description is empty. Model output: {commit_data}")
