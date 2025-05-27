@@ -39,7 +39,7 @@ def get_model_config() -> dict:
     config_path = get_cache_dir() / "model_config.json"
     default_config = {
         "model_name": "Qwen/Qwen2.5-Coder-3B-Instruct",
-        "temperature": 0.7,
+        "temperature": 0.2,
         "top_p": 0.95,
         "num_return_sequences": 1
     }
@@ -175,33 +175,38 @@ def generate_commit_message(
     
     # Construct the messages for chat template
     messages = [
-        {"role": "system", "content": "You are an expert in Conventional Commits. Your task is to generate commit messages in JSON format based on git diffs and code context."},
-        {"role": "user", "content": f"""Analyze this git diff and generate a commit message in JSON format.
+    {"role": "system", "content": """You are a highly specialized AI assistant. Your ONLY function is to analyze git diffs and provided code context, then generate a concise commit message strictly in JSON format.
+        You MUST output a single, valid JSON object and NOTHING ELSE. Do not include any explanatory text, apologies, or any other characters before or after the JSON object itself.
+        Adhere meticulously to the JSON schema and rules provided."""},
+            {"role": "user", "content": f"""Analyze the provided context and git diff, then generate a commit message in JSON format.
 
-{context_section}--- BEGIN GIT DIFF ---
-{diff}
---- END GIT DIFF ---
+        {context_section}
+        --- BEGIN GIT DIFF ---
+        {diff}
+        --- END GIT DIFF ---
 
-{additional_context if additional_context else ''}
+        {additional_context if additional_context else ''} 
 
-Scope: {scope if scope else 'general'}
+        Scope for the commit (use this if relevant, otherwise determine from context or set to null): {scope if scope else 'general'}
 
-Rules:
-1. Return ONLY a JSON object with these fields:
-   - type: one of {', '.join(ALLOWED_TYPES)}
-   - scope: short, lowercase noun or null
-   - description: concise, imperative summary starting with a verb, not empty
+        **Output Adherence Rules:**
+        1. Your entire response MUST be a single, valid JSON object.
+        2. Do NOT include any text, comments, or explanations before or after the JSON object.
+        3. Ensure all string values within the JSON are properly escaped.
+        4. The 'type' field MUST be one of: {', '.join(ALLOWED_TYPES)}.
+        5. The 'scope' field MUST be a short, lowercase noun or null.
+        6. The 'description' field MUST be a concise, imperative summary starting with a verb and MUST NOT be empty.
 
-Example format:
-{{
-    "type": "feat",
-    "scope": "api",
-    "description": "add user authentication endpoint"
-}}
+        **JSON Schema Example:**
+        {{
+            "type": "feat",
+            "scope": "api",
+            "description": "add user authentication endpoint"
+        }}
 
-Your response (JSON only):"""}
-    ]
-    
+        Your response (A single, valid JSON object ONLY):"""}
+        ]
+      
     try:
         # Apply chat template
         text = tokenizer.apply_chat_template(
@@ -211,7 +216,7 @@ Your response (JSON only):"""}
         )
         
         # Tokenize the prompt
-        inputs = tokenizer(text, return_tensors="pt", max_length=4096, truncation=True)
+        inputs = tokenizer(text, return_tensors="pt", max_length=32768, truncation=True)
         
         if hasattr(model, 'device'):
             inputs = {k: v.to(model.device) for k, v in inputs.items()}
@@ -238,7 +243,7 @@ Your response (JSON only):"""}
         input_length = inputs["input_ids"].shape[1]
         generated_tokens = outputs[0][input_length:]
         completion = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
-        
+        print(f"\nDEBUG: Full raw model completion directly from tokenizer.decode():\n>>>\n{completion}\n<<<\n") 
         # ---- Robust JSON Extraction Logic ----
         extracted_json_string = None
 
