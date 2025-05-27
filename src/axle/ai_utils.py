@@ -174,38 +174,43 @@ def generate_commit_message(
         context_section += "--- END AXLE INIT CONTEXT ---\n\n"
     
     # Construct the messages for chat template
+    # In your generate_commit_message function, update the 'messages'
     messages = [
-    {"role": "system", "content": """You are a highly specialized AI assistant. Your ONLY function is to analyze git diffs and provided code context, then generate a concise commit message strictly in JSON format.
-        You MUST output a single, valid JSON object and NOTHING ELSE. Do not include any explanatory text, apologies, or any other characters before or after the JSON object itself.
-        Adhere meticulously to the JSON schema and rules provided."""},
-            {"role": "user", "content": f"""Analyze the provided context and git diff, then generate a commit message in JSON format.
+        {"role": "system", "content": f"""You are an expert in Conventional Commits. Your task is to generate commit messages strictly in JSON format based on git diffs and any provided code context.
+    You MUST output a single, valid JSON object and NOTHING ELSE. Do not include any explanatory text before or after the JSON object itself.
+    The 'description' should be a concise high-level summary. If there are multiple distinct changes or important details, elaborate on them in the 'body' field.
+    Allowed types for the 'type' field: {', '.join(ALLOWED_TYPES)}"""},
+        {"role": "user", "content": f"""Analyze the provided context and git diff, then generate a commit message in JSON format.
 
-        {context_section}
-        --- BEGIN GIT DIFF ---
-        {diff}
-        --- END GIT DIFF ---
+    {context_section} 
+    --- BEGIN GIT DIFF ---
+    {diff}
+    --- END GIT DIFF ---
 
-        {additional_context if additional_context else ''} 
+    {additional_context if additional_context else ''} 
 
-        Scope for the commit (use this if relevant, otherwise determine from context or set to null): {scope if scope else 'general'}
+    Scope for the commit (use this if relevant, otherwise determine from context or set to null): {scope if scope else 'general'}
 
-        **Output Adherence Rules:**
-        1. Your entire response MUST be a single, valid JSON object.
-        2. Do NOT include any text, comments, or explanations before or after the JSON object.
-        3. Ensure all string values within the JSON are properly escaped.
-        4. The 'type' field MUST be one of: {', '.join(ALLOWED_TYPES)}.
-        5. The 'scope' field MUST be a short, lowercase noun or null.
-        6. The 'description' field MUST be a concise, imperative summary starting with a verb and MUST NOT be empty.
+    **Output Adherence Rules:**
+    1. Your entire response MUST be a single, valid JSON object.
+    2. Do NOT include any text, comments, or explanations before or after the JSON object.
+    3. The JSON object MUST contain these fields:
+    - `type`: string (one of {', '.join(ALLOWED_TYPES)})
+    - `scope`: string (short, lowercase noun) or null
+    - `description`: string (concise, imperative, high-level summary starting with a verb, NOT empty)
+    - `body`: string (detailed explanation, can be multi-line with '\\n' for newlines, or null if not needed. Use this to list multiple distinct changes or provide more context.)
+    4. Ensure all string values within the JSON are properly escaped.
 
-        **JSON Schema Example:**
-        {{
-            "type": "feat",
-            "scope": "api",
-            "description": "add user authentication endpoint"
-        }}
+    **JSON Schema Example (with a body):**
+    {{
+        "type": "refactor",
+        "scope": "ai_utils",
+        "description": "optimize model parameters and prompt structure",
+        "body": "Key improvements made to AI generation module:\n- Adjusted model temperature to 0.2 for more predictable output.\n- Increased maximum token limit to support more complex diffs.\n- Updated the system prompt to provide clearer instructions for JSON formatting."
+    }}
 
-        Your response (A single, valid JSON object ONLY):"""}
-        ]
+    Your response (A single, valid JSON object ONLY):"""}
+    ]
       
     try:
         # Apply chat template
