@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "axle"
-version = "0.1.0"
+version = "2.0.0" 
 authors = [
     { name = "Onkar", email = "dahaleonkar@gmail.com" },
 ]
@@ -18,7 +18,6 @@ classifiers = [
 ]
 dependencies = [
     "click",
-    "openai",
     "transformers",
     "torch",
     "accelerate"
@@ -28,4 +27,4 @@ dependencies = [
 axle = "axle.main:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/axle"] 
+packages = ["src/axle"]
