@@ -5,12 +5,14 @@ This module handles the creation and management of the local knowledge base
 that stores information about the project's codebase structure.
 """
 
-import ast
 import json
 import os
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+
+from .treesitter import TreeSitterParser
+from .treesitter.exceptions import TreeSitterError
 
 logger = logging.getLogger(__name__)
 
@@ -26,91 +28,55 @@ class KnowledgeBase:
         self.project_root = project_root
         self.kb_dir = project_root / '.axle'
         self.kb_dir.mkdir(exist_ok=True)
+        self.parser = TreeSitterParser()
         
     def analyze_file(self, file_path: Path) -> Optional[Dict[str, Any]]:
         """Analyze a Python file and extract structural information.
         
         Args:
-            file_path: Path to the Python file to analyze
+            file_path: Absolute path to the Python file to analyze.
             
         Returns:
-            Dictionary containing the extracted information, or None if analysis fails
+            Dictionary containing the extracted information with a 'path' key
+            containing the relative path, or None if analysis fails.
         """
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-                
-            tree = ast.parse(content)
+            relative_path_str = str(file_path.relative_to(self.project_root))
+            result = self.parser.analyze_file(file_path)
             
-            # Extract imports
-            imports = []
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for name in node.names:
-                        imports.append(name.name.split('.')[0])  # Only take the base module name
-                elif isinstance(node, ast.ImportFrom):
-                    module = node.module if node.module else ''
-                    for name in node.names:
-                        imports.append(module.split('.')[0])  # Only take the base module name
+            if result is None:
+                logger.warning(f"Parser returned None for {file_path}")
+                return None
+
+            analysis = result.model_dump(exclude_none=True)
             
-            # Extract classes and functions
-            classes = []
-            functions = []
+            # --- Standardize Path ---
+            if 'file_path' in analysis:
+                del analysis['file_path']
+            analysis['path'] = relative_path_str
             
-            # Only count top-level functions (not methods)
-            for node in tree.body:
-                if isinstance(node, ast.ClassDef):
-                    class_info = {
-                        'name': node.name,
-                        'docstring': ast.get_docstring(node),
-                        'methods': []
-                    }
-                    # Extract methods
-                    for item in node.body:
-                        if isinstance(item, ast.FunctionDef):
-                            method_info = {
-                                'name': item.name,
-                                'docstring': ast.get_docstring(item),
-                                'parameters': [
-                                    {
-                                        'name': arg.arg,
-                                        'annotation': ast.unparse(arg.annotation) if arg.annotation else None
-                                    }
-                                    for arg in item.args.args
-                                ]
-                            }
-                            class_info['methods'].append(method_info)
-                    classes.append(class_info)
-                elif isinstance(node, ast.FunctionDef):
-                    function_info = {
-                        'name': node.name,
-                        'docstring': ast.get_docstring(node),
-                        'parameters': [
-                            {
-                                'name': arg.arg,
-                                'annotation': ast.unparse(arg.annotation) if arg.annotation else None
-                            }
-                            for arg in node.args.args
-                        ]
-                    }
-                    functions.append(function_info)
+            # --- Ensure Core Structural Keys Exist ---
+            # If 'classes' is not in analysis (due to exclude_none=True or parser),
+            # add it as an empty list. Same for functions and imports.
+            analysis.setdefault('imports', [])
+            analysis.setdefault('classes', [])
+            analysis.setdefault('functions', [])
             
-            # Determine file category based on path and imports
-            category = self._determine_file_category(file_path, imports)
+            # --- Category Determination ---
+            # file_path is absolute here for categorization logic
+            analysis['category'] = self._determine_file_category(file_path, analysis['imports']) 
+           
+            return analysis
             
-            return {
-                'path': str(file_path.relative_to(self.project_root)),
-                'imports': imports,
-                'classes': classes,
-                'functions': functions,
-                'category': category
-            }
-            
-        except Exception as e:
-            logger.warning(f"Failed to analyze {file_path}: {str(e)}")
+        except TreeSitterError as e: 
+            logger.warning(f"TreeSitter parsing failed for {file_path}: {str(e)}")
             return None
-    
-    def _determine_file_category(self, file_path: Path, imports: List[str]) -> str:
+        except Exception as e:
+            # Log the actual exception type for better debugging
+            logger.warning(f"Failed to analyze {file_path} due to {type(e).__name__}: {str(e)}")
+            return None
+        
+    def _determine_file_category(self, file_path: Path, imports: List[Dict[str, Any]]) -> str:
         """Determine the category of a file based on its path and imports.
         
         Args:
@@ -135,19 +101,28 @@ class KnowledgeBase:
             'torch': 'ml',
             'sklearn': 'ml'
         }
-        for import_name in imports:
+        
+        # Extract base module names from imports
+        import_names = []
+        for imp_item in imports: # imp_item is a dict e.g. {'name': 'sys', 'source': 'sys'}
+            if isinstance(imp_item, dict):
+                name = imp_item.get('name', '')
+                if name: # 'name' can be like 'pathlib' or '.git_utils'
+                    import_names.append(name.split('.')[0].lstrip('.')) # Get base module, remove leading '.'
+              
+        for import_name in import_names:
+            if not import_name: continue # Skip empty strings from relative imports like '.'
             for indicator, category in framework_indicators.items():
                 if indicator in import_name.lower():
                     return category
+                    
         # Check path-based heuristics (util/helper before test/spec)
-        if 'util' in path_str.lower() or 'helper' in path_str.lower():
-            return 'util'
-        if 'test' in path_str.lower() or 'spec' in path_str.lower():
-            return 'test'
-        if 'controller' in path_str.lower():
-            return 'controller'
-        if 'service' in path_str.lower():
-            return 'service'
+        if 'util' in path_str.lower() or 'helper' in path_str.lower(): return 'util'
+        if 'test' in path_str.lower() or 'spec' in path_str.lower(): return 'test'
+        if 'controller' in path_str.lower(): return 'controller'
+        if 'service' in path_str.lower(): return 'service'
+        if Path(file_path).name == '__init__.py': return 'package_init'
+        if Path(file_path).name == 'main.py' or Path(file_path).name == 'cli.py' : return 'entrypoint'
         return 'unknown'
     
     def build_knowledge_base(self) -> None:
