@@ -7,7 +7,7 @@ import os
 import subprocess 
 from pathlib import Path
 from . import __version__
-from .git_utils import is_git_installed, get_staged_diff, get_staged_files_count, get_staged_file_paths
+from .git_utils import is_git_installed, get_staged_diff, get_staged_file_paths
 from .commit_message import derive_scope
 from .editor_utils import open_editor
 from .ai_utils import generate_commit_message
@@ -145,6 +145,9 @@ def commit(regenerate):
                     message_from_editor += f"Fixes: {issue_refs}\n"
                 if breaking_change_desc:
                     message_from_editor += f"BREAKING CHANGE: {breaking_change_desc}\n"
+
+            with open(temp_file_this_iteration, 'w', encoding='utf-8') as f_rewrite:
+                f_rewrite.write(message_from_editor)
 
             user_input = click.prompt(
                 "\nCommit message saved. What would you like to do?",

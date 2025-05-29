@@ -1,152 +1,193 @@
+"""Tests for the main CLI module."""
+
 import unittest
-from unittest.mock import patch, MagicMock
-# import sys # Not strictly needed for tests here unless manipulating sys.path etc.
-# from io import StringIO # Not strictly needed for these tests
+from unittest.mock import patch, MagicMock, mock_open 
+import subprocess 
+
 from click.testing import CliRunner
-from axle.main import main # Assuming axle.main can be imported this way
+from axle.main import main
 
 class TestMain(unittest.TestCase):
     def setUp(self):
         self.runner = CliRunner()
 
+        self.patchers = {
+            'is_git_installed': patch('axle.main.is_git_installed', return_value=True),
+            'subprocess_run': patch('axle.main.subprocess.run'),
+            'get_staged_diff': patch('axle.main.get_staged_diff', return_value="fake diff data"),
+            'get_staged_files_count': patch('axle.main.get_staged_files_count', return_value=1),
+            'get_staged_file_paths': patch('axle.main.get_staged_file_paths', return_value=['fake/path.py']),
+            'derive_scope': patch('axle.main.derive_scope', return_value='testscope'),
+            'KnowledgeBase': patch('axle.main.KnowledgeBase'),
+            'generate_commit_message': patch('axle.main.generate_commit_message', return_value="AI Generated Message"),
+            'open_editor': patch('axle.main.open_editor', return_value=True),
+            'os_remove': patch('axle.main.os.remove'),
+            'NamedTemporaryFile': patch('axle.main.tempfile.NamedTemporaryFile'),
+            'os_path_exists': patch('axle.main.os.path.exists'),
+            'builtins_open': patch('builtins.open', new_callable=mock_open),
+        }
+        self.mocks = {name: p.start() for name, p in self.patchers.items()}
+
+        self.mock_rev_parse_success = MagicMock(returncode=0, stdout=b'.git')
+        self.mocks['subprocess_run'].return_value = self.mock_rev_parse_success # Default for first call
+
+        mock_kb_instance = MagicMock()
+        mock_kb_instance.kb_dir.exists.return_value = True
+        mock_kb_instance.is_stale.return_value = False
+        mock_kb_instance.get_file_analysis.return_value = "File analysis context"
+        self.mocks['KnowledgeBase'].return_value = mock_kb_instance
+        self.mock_kb_instance = mock_kb_instance
+
+        self.mock_temp_file_obj = MagicMock()
+        self.mock_temp_file_obj.name = "fake_temp_commit_msg.txt"
+        self.mock_temp_file_obj.__enter__.return_value = self.mock_temp_file_obj
+        self.mock_temp_file_obj.__exit__.return_value = None
+        self.mocks['NamedTemporaryFile'].return_value = self.mock_temp_file_obj
+
+        # Configure os.path.exists
+        def os_path_exists_side_effect(path):
+            if path == self.mock_temp_file_obj.name:
+                return True
+            return False # Default to false for unexpected paths in test scope
+        self.mocks['os_path_exists'].side_effect = os_path_exists_side_effect
+
+        # Configure builtins.open and NamedTemporaryFile write interaction
+        self.temp_file_content_store = "AI Generated Message" # Initial default
+        
+        def named_temp_file_write_effect(content_written):
+            self.temp_file_content_store = content_written
+        self.mock_temp_file_obj.write.side_effect = named_temp_file_write_effect
+        
+        # Mock for builtins.open().read() and builtins.open().write()
+        def builtins_open_write_effect(content_written):
+            self.temp_file_content_store = content_written
+        
+        # When builtins.open is called, its read/write should use the store
+        self.mocks['builtins_open'].return_value.read.side_effect = lambda: self.temp_file_content_store
+        self.mocks['builtins_open'].return_value.write.side_effect = builtins_open_write_effect
+
+
+    def tearDown(self):
+        patch.stopall()
+
     def test_version_flag(self):
+        """Test version flag."""
         result = self.runner.invoke(main, ['--version'])
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("axle 0.1.0", result.output) # Make sure version is accurate
+        self.assertIn("axle 3.0.0", result.output)
 
     def test_help_flag(self):
         result = self.runner.invoke(main, ['--help'])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Generate a commit message using AI based on staged changes", result.output)
 
-    # Patching where the names are looked up in axle.main
-    @patch('axle.main.get_staged_diff')
-    @patch('axle.main.is_git_installed')
-    def test_no_git_installed(self, mock_is_git_installed, mock_get_staged_diff):
-        mock_is_git_installed.return_value = False
-        # get_staged_diff should not be called if git is not installed.
-        # Its side_effect is not strictly necessary to set for this test's primary path,
-        # but doesn't hurt if it were accidentally called.
-        # mock_get_staged_diff.side_effect = RuntimeError("git is not installed or not found in PATH.")
-        result = self.runner.invoke(main)
-        self.assertEqual(result.exit_code, 1)
+    def test_no_staged_changes(self):
+        """Test behavior when there are no staged changes."""
+        self.mocks['get_staged_diff'].return_value = ""
+        result = self.runner.invoke(main, ['commit'])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("No staged changes found. Please use `git add` to stage files before running `axle`.", result.output)
+
+    def test_no_git_installed(self):
+        """Test behavior when git is not installed."""
+        self.mocks['is_git_installed'].return_value = False
+        result = self.runner.invoke(main, ['commit'])
+        self.assertEqual(result.exit_code, 1, msg=result.output)
         self.assertIn("Error: Git is not installed or not found in PATH.", result.output)
 
-    @patch('axle.main.is_git_installed')
-    @patch('axle.main.get_staged_diff')
-    def test_no_staged_changes(self, mock_get_staged_diff, mock_is_git_installed):
-        mock_is_git_installed.return_value = True
-        mock_get_staged_diff.return_value = None # Simulate no diff
-        result = self.runner.invoke(main)
-        self.assertEqual(result.exit_code, 0)
-        self.assertIn("No staged changes found", result.output)
+    def test_successful_diff_becomes_successful_commit(self):
+        """Test successful diff leading to a successful commit."""
+        mock_git_commit_success = MagicMock(returncode=0)
+        
+        def subprocess_run_side_effect(*args, **kwargs):
+            command_args = args[0]
+            if command_args[0] == 'git' and command_args[1] == 'rev-parse':
+                return self.mock_rev_parse_success
+            elif command_args[0] == 'git' and command_args[1] == 'commit':
+                if kwargs.get('check') and mock_git_commit_success.returncode != 0:
+                    raise subprocess.CalledProcessError(mock_git_commit_success.returncode, command_args)
+                return mock_git_commit_success
+            unexpected_mock = MagicMock(returncode=1, stderr=b"Unexpected direct subprocess call in test")
+            if kwargs.get('check'):
+                raise subprocess.CalledProcessError(1, command_args)
+            return unexpected_mock
 
-    @patch('axle.main.is_git_installed')
-    @patch('axle.main.get_staged_diff')
-    @patch('axle.main.get_staged_files_count') # Patched in axle.main
-    @patch('axle.main.get_staged_file_paths') # Patched in axle.main
-    @patch('axle.main.generate_commit_message') # Patched in axle.main
-    @patch('axle.main.open_editor')           # Patched in axle.main
-    @patch('builtins.input', new_callable=MagicMock) # For click.prompt if it falls back
-    @patch('click.prompt', new_callable=MagicMock)    # More direct for click.prompt
-    def test_successful_diff(self, mock_click_prompt, mock_input, mock_open_editor, 
-                           mock_generate_commit_message, mock_get_staged_file_paths, 
-                           mock_get_staged_files_count, mock_get_staged_diff, 
-                           mock_is_git_installed):
-        # Setup mocks
-        mock_is_git_installed.return_value = True
-        mock_get_staged_diff.return_value = "test diff"
-        mock_get_staged_files_count.return_value = 1 # Ensure this is used or remove if not
-        mock_get_staged_file_paths.return_value = ["test.py"]
-        mock_generate_commit_message.return_value = "feat: test commit"
-        mock_open_editor.return_value = True # Editor opens and saves successfully
-        # mock_input.return_value = 'c' # For builtins.input
-        mock_click_prompt.return_value = 'c' # For click.prompt
-
-        # Mock subprocess.run for git commit
-        with patch('axle.main.subprocess.run') as mock_run: # Patch subprocess where it's used in main
-            mock_run.return_value = MagicMock(returncode=0)
-            result = self.runner.invoke(main)
-            self.assertEqual(result.exit_code, 0, msg=result.output)
-            self.assertIn("Commit successful", result.output)
-            mock_run.assert_called_once() # Check that git commit was called
-            # Check that it was called with -F and a file path (harder to check specific temp file path)
-            args, kwargs = mock_run.call_args
-            self.assertIn('-F', args[0])
+        self.mocks['subprocess_run'].side_effect = subprocess_run_side_effect
+        
+        # Simulate initial message generation
+        self.mocks['generate_commit_message'].return_value = "Initial Commit Message"
+        # Set initial content for temp file write and subsequent read
+        self.temp_file_content_store = "Initial Commit Message"
 
 
-    @patch('axle.main.is_git_installed')
-    @patch('axle.main.get_staged_diff')
-    @patch('axle.main.get_staged_files_count')
-    @patch('axle.main.get_staged_file_paths')
-    @patch('axle.main.generate_commit_message')
-    @patch('axle.main.open_editor')
-    @patch('click.prompt', new_callable=MagicMock)
-    def test_interactive_commit(self, mock_click_prompt, mock_open_editor, 
-                                mock_generate_commit_message, mock_get_staged_file_paths, 
-                                mock_get_staged_files_count, mock_get_staged_diff, mock_is_git_installed):
-        mock_is_git_installed.return_value = True
-        mock_get_staged_diff.return_value = "test diff"
-        mock_get_staged_files_count.return_value = 1
-        mock_get_staged_file_paths.return_value = ["test.py"]
-        mock_generate_commit_message.return_value = "feat: test commit"
-        mock_open_editor.return_value = True
-        mock_click_prompt.return_value = 'c'
+        test_input = "\nn\nc\n" # No issues, No breaking changes, Commit
+        result = self.runner.invoke(main, ['commit'], input=test_input)
+        
+        self.assertEqual(result.exit_code, 0, msg=f"Output: {result.output} | Exception: {result.exception}")
+        self.assertIn("Commit successful.", result.output)
+        self.mocks['generate_commit_message'].assert_called_once()
+        self.mocks['open_editor'].assert_called_once()
+        self.mocks['subprocess_run'].assert_any_call(['git', 'commit', '-F', self.mock_temp_file_obj.name], check=True)
+        self.mocks['os_remove'].assert_called_with(self.mock_temp_file_obj.name)
 
-        with patch('axle.main.subprocess.run') as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            result = self.runner.invoke(main)
-            self.assertEqual(result.exit_code, 0, msg=result.output)
-            self.assertIn("Commit successful", result.output)
+    def test_interactive_commit(self):
+        """Test interactive commit message generation and actual commit."""
+        initial_message = "AI Generated Message for interactive commit"
+        self.mocks['generate_commit_message'].return_value = initial_message
+        self.temp_file_content_store = initial_message # Set for reads/writes
 
-    @patch('axle.main.is_git_installed')
-    @patch('axle.main.get_staged_diff')
-    @patch('axle.main.get_staged_files_count')
-    @patch('axle.main.get_staged_file_paths')
-    @patch('axle.main.generate_commit_message')
-    @patch('axle.main.open_editor')
-    @patch('click.prompt', new_callable=MagicMock)
-    def test_interactive_edit_again(self, mock_click_prompt, mock_open_editor, 
-                                    mock_generate_commit_message, mock_get_staged_file_paths, 
-                                    mock_get_staged_files_count, mock_get_staged_diff, mock_is_git_installed):
-        mock_is_git_installed.return_value = True
-        mock_get_staged_diff.return_value = "test diff"
-        mock_get_staged_files_count.return_value = 1
-        mock_get_staged_file_paths.return_value = ["test.py"]
-        mock_generate_commit_message.return_value = "feat: initial commit"
-        # First call to open_editor (initial edit), second call (after choosing 'e')
-        mock_open_editor.return_value = True # Assume editor always succeeds for this test path
-        # User chooses 'e' then 'c'
-        mock_click_prompt.side_effect = ['e', 'c']
+        mock_git_commit_success = MagicMock(returncode=0)
+        def subprocess_run_side_effect(*args, **kwargs):
+            command_args = args[0]
+            if command_args[0] == 'git' and command_args[1] == 'rev-parse':
+                return self.mock_rev_parse_success
+            elif command_args[0] == 'git' and command_args[1] == 'commit':
+                return mock_git_commit_success
+            return MagicMock(returncode=1, stderr=b"Unexpected subprocess call")
+        self.mocks['subprocess_run'].side_effect = subprocess_run_side_effect
 
-        with patch('axle.main.subprocess.run') as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            result = self.runner.invoke(main)
-            self.assertEqual(result.exit_code, 0, msg=result.output)
-            self.assertIn("Commit successful", result.output)
-            self.assertEqual(mock_open_editor.call_count, 2) # Editor opened twice
+        test_input = "MYISSUE-1\nn\nc\n" # Issue "MYISSUE-1", No breaking, Commit
+        result = self.runner.invoke(main, ['commit'], input=test_input)
 
-    @patch('axle.main.is_git_installed')
-    @patch('axle.main.get_staged_diff')
-    @patch('axle.main.get_staged_files_count')
-    @patch('axle.main.get_staged_file_paths')
-    @patch('axle.main.generate_commit_message')
-    @patch('axle.main.open_editor')
-    @patch('click.prompt', new_callable=MagicMock)
-    def test_interactive_abort(self, mock_click_prompt, mock_open_editor, 
-                               mock_generate_commit_message, mock_get_staged_file_paths, 
-                               mock_get_staged_files_count, mock_get_staged_diff, mock_is_git_installed):
-        mock_is_git_installed.return_value = True
-        mock_get_staged_diff.return_value = "test diff"
-        mock_get_staged_files_count.return_value = 1
-        mock_get_staged_file_paths.return_value = ["test.py"]
-        mock_generate_commit_message.return_value = "feat: test commit"
-        mock_open_editor.return_value = True
-        mock_click_prompt.return_value = 'a' # User aborts
+        self.assertEqual(result.exit_code, 0, msg=f"Output: {result.output} | Exception: {result.exception}")
+        self.assertIn("Commit successful.", result.output)
+        self.mocks['generate_commit_message'].assert_called_once()
+        self.mocks['open_editor'].assert_called_once()
+        self.mocks['subprocess_run'].assert_any_call(['git', 'commit', '-F', self.mock_temp_file_obj.name], check=True)
+        self.mocks['os_remove'].assert_called_with(self.mock_temp_file_obj.name)
+        
+        # To verify content written for commit:
+        self.assertIn("Fixes: MYISSUE-1", self.temp_file_content_store) # Check final content
 
-        result = self.runner.invoke(main)
-        self.assertEqual(result.exit_code, 0, msg=result.output)
+    def test_interactive_edit_again_then_abort(self):
+        """Test choosing 'edit', then 'abort'."""
+        initial_message = "AI Message for edit then abort"
+        self.mocks['generate_commit_message'].return_value = initial_message
+        self.temp_file_content_store = initial_message
+        
+        test_input = "\nn\ne\n\nn\na\n" # Loop1: No issues, No breaking, Edit; Loop2: No issues, No breaking, Abort
+        result = self.runner.invoke(main, ['commit'], input=test_input)
+        
+        self.assertEqual(result.exit_code, 0, msg=f"Output: {result.output} | Exception: {result.exception}")
         self.assertIn("Aborted.", result.output)
+        self.mocks['generate_commit_message'].assert_called_once()
+        self.assertEqual(self.mocks['open_editor'].call_count, 2)
+        self.assertEqual(self.mocks['os_remove'].call_count, 2) # Should be called after each loop iteration's finally block
+
+    def test_interactive_abort(self):
+        """Test interactive commit message abort."""
+        initial_message = "AI Message for abort"
+        self.mocks['generate_commit_message'].return_value = initial_message
+        self.temp_file_content_store = initial_message
+        
+        test_input = "\nn\na\n" # No issues, No breaking changes, Abort action
+        result = self.runner.invoke(main, ['commit'], input=test_input)
+        
+        self.assertEqual(result.exit_code, 0, msg=f"Output: {result.output} | Exception: {result.exception}")
+        self.assertIn("Aborted.", result.output)
+        self.mocks['generate_commit_message'].assert_called_once()
+        self.mocks['open_editor'].assert_called_once()
+        self.mocks['os_remove'].assert_called_with(self.mock_temp_file_obj.name)
 
 if __name__ == '__main__':
     unittest.main()
