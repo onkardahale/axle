@@ -50,7 +50,7 @@ def get_model_config() -> dict:
             with open(config_path) as f:
                 return json.load(f)
         except json.JSONDecodeError:
-            print("Warning: Could not decode model_config.json, using defaults.")
+            RuntimeError("Warning: Could not decode model_config.json, using defaults.")
             return default_config
     return default_config
 
@@ -61,7 +61,7 @@ def save_model_config(config: dict):
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=2)
     except IOError as e:
-        print(f"Warning: Could not save model_config.json: {str(e)}")
+        RuntimeError(f"Warning: Could not save model_config.json: {str(e)}")
 
 
 def get_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
@@ -79,7 +79,6 @@ def get_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     cache_dir_models = get_cache_dir() / "models"
     
     try:
-        logging.set_verbosity_error()
         
         tokenizer = AutoTokenizer.from_pretrained(
             model_name,
@@ -96,7 +95,6 @@ def get_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
             torch_dtype=torch.float16,
             device_map="auto"
         )
-        print(f"Model loaded on device: {model.device}") # Add this line
         # Set padding token if not set, common for generation
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -253,7 +251,6 @@ def generate_commit_message(
         print(f"Inference information: {inference_duration_ms:.2f} ms, {1000*len(outputs[0])/inference_duration_ms} tokens/sec") 
    
         completion = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
-        print(f"\nDEBUG: Full raw model completion directly from tokenizer.decode():\n>>>\n{completion}\n<<<\n") 
         
         # ---- Robust JSON Extraction Logic ----
         extracted_json_string = None
@@ -294,16 +291,11 @@ def generate_commit_message(
         # ---- End of Robust JSON Extraction Logic ----
 
         if extracted_json_string is None:
-            print(f"Debug: Full model completion (no JSON structure found):\n{completion}")
             raise GenerationError("Could not extract a clear JSON object from the model's output.")
-
-        # For debugging, print what is about to be parsed
-        print(f"Debug: Attempting to parse as JSON:\n>>>\n{extracted_json_string}\n<<<")
         
         try:
             commit_data = json.loads(extracted_json_string)
         except json.JSONDecodeError as e:
-            print(f"Debug: Failed to parse JSON:\n{extracted_json_string}")
             raise GenerationError(f"Failed to parse JSON from model: {str(e)}")
 
         type_ = commit_data.get("type", "feat")
@@ -315,7 +307,6 @@ def generate_commit_message(
         body = commit_data.get("body")
 
         if not description: # Ensure description is not empty
-            print(f"Warning: Generated description is empty. Model output: {commit_data}")
             raise GenerationError("Generated commit message has an empty description.")
 
         if scope_:
