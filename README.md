@@ -11,6 +11,8 @@ Axle is a command-line tool that helps you write better commit messages using AI
 - 💾 Automatic model caching for faster subsequent runs
 - 🛠️ Configurable generation parameters
 - 📚 Support for conventional commit types and scopes
+- 🌳 Tree-sitter based code parsing for better context understanding
+- 🌐 Extensible language support through tree-sitter grammars
 
 ## Installation
 
@@ -47,12 +49,28 @@ axle commit
 
 The `axle init` command creates a local knowledge base in the `.axle` directory of your project. This knowledge base:
 
-- Analyzes your Python codebase using AST parsing
+- Analyzes your codebase using tree-sitter for accurate parsing
 - Extracts structural information, docstrings, and imports
 - Categorizes files based on their purpose
 - Provides rich context for commit message generation
+- Supports multiple programming languages through tree-sitter grammars
 
 The knowledge base is automatically used when generating commit messages, leading to more accurate and contextually relevant messages.
+
+### Language Support
+
+While Axle currently focuses on Python codebases, it's designed to be language-agnostic through its use of tree-sitter. The project uses `tree-sitter-language-pack` which provides built-in support for multiple languages. This architecture allows for easy expansion to support languages like:
+- JavaScript/TypeScript
+- Java
+- Go
+- Rust
+- C/C++
+- And many more
+
+To add support for a new language, you can:
+1. Ensure the language is included in `tree-sitter-language-pack`
+2. Add language-specific parsing rules to the Axle project
+3. Configure the language parser in the knowledge base
 
 ## Interactive Features
 
@@ -125,16 +143,19 @@ The final commit message will include:
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.9+
 - Git
 - A text editor (vim, nano, etc.)
 
 ## Dependencies
 
+- click
 - transformers
 - torch
 - accelerate
-- click
+- tree-sitter (>=0.20.3,<0.23.0)
+- tree-sitter-language-pack
+- pydantic (>=2.0.0)
 
 ## License
 
