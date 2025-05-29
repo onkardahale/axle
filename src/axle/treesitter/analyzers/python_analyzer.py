@@ -7,11 +7,6 @@ from tree_sitter import Node, Tree
 
 import logging
 
-# Configure logging to show all levels
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(levelname)s:%(name)s:%(lineno)d:%(message)s'
-)
 logger = logging.getLogger(__name__)
 
 from . import BaseAnalyzer 
@@ -278,8 +273,6 @@ class PythonAnalyzer(BaseAnalyzer):
             all_name_field_nodes = list(node.children_by_field_name("name"))
             
             if not all_name_field_nodes:
-                logger.warning(f"    ImportFrom: No items found (field 'name' yielded no nodes) for: {self._get_node_text(node, source_code)}")
-                
                 # Check if items are direct children not under 'name' field (older/different grammars)
                 potential_item_nodes = [
                     child for child in node.named_children 
@@ -293,7 +286,6 @@ class PythonAnalyzer(BaseAnalyzer):
             item_nodes_to_extract_text_from = [] 
             
             for name_field_node_idx, name_field_node in enumerate(all_name_field_nodes):
-                logger.warning(f"      Processing 'name' field node candidate [{name_field_node_idx}]: type='{name_field_node.type}', text='{self._get_node_text(name_field_node, source_code)}'")
                 if name_field_node.type == "wildcard_import":
                     is_wildcard_import = True
                     imported_items_texts.append("*")
