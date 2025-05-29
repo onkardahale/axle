@@ -5,7 +5,8 @@ import torch
 from transformers.utils import logging
 import json
 from pathlib import Path
-import re # Import the 're' module for regular expressions
+import re 
+import time 
 
 # Set tokenizers parallelism to false to avoid warnings
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -233,7 +234,7 @@ def generate_commit_message(
             save_model_config(config)
         
         with torch.no_grad():
-            
+            start_time = time.perf_counter()  # Start timing
             outputs = model.generate(
                 inputs["input_ids"],
                 max_new_tokens=250, # Increased slightly for potentially complex JSON structures or minor verbosity
@@ -243,12 +244,17 @@ def generate_commit_message(
                 top_p=config["top_p"],
                 pad_token_id=tokenizer.eos_token_id
             )
+            end_time = time.perf_counter()  # End timing
+            inference_duration_ms = (end_time - start_time) * 1000  # Convert to milliseconds
         
         # Decode only the newly generated tokens
         input_length = inputs["input_ids"].shape[1]
         generated_tokens = outputs[0][input_length:]
+        print(f"Inference information: {inference_duration_ms:.2f} ms, {1000*len(outputs[0])/inference_duration_ms} tokens/sec") 
+   
         completion = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
         print(f"\nDEBUG: Full raw model completion directly from tokenizer.decode():\n>>>\n{completion}\n<<<\n") 
+        
         # ---- Robust JSON Extraction Logic ----
         extracted_json_string = None
 
@@ -289,7 +295,7 @@ def generate_commit_message(
 
         if extracted_json_string is None:
             print(f"Debug: Full model completion (no JSON structure found):\n{completion}")
-            raise GenerationError(f"Could not extract a clear JSON object from the model's output.")
+            raise GenerationError("Could not extract a clear JSON object from the model's output.")
 
         # For debugging, print what is about to be parsed
         print(f"Debug: Attempting to parse as JSON:\n>>>\n{extracted_json_string}\n<<<")
