@@ -145,32 +145,71 @@ def generate_commit_message(
     context_section = ""
     if context:
         context_section = "--- BEGIN AXLE INIT CONTEXT ---\n"
-        for file_analysis in context:
-            context_section += f"File '{file_analysis['path']}' (purposeCategory: {file_analysis['category']}, imports: {file_analysis['imports']}):\n"
+        for file_analysis in context: # 'context' is a list of 'file_analysis' dicts
+            # Previous fixes in KnowledgeBase ensure 'path', 'category', 'imports', 
+            # 'classes', 'functions' keys exist at this top level of file_analysis.
+            path_str = file_analysis.get('path', 'Unknown File') 
+            category_str = file_analysis.get('category', 'N/A')
+            imports_list_str = str(file_analysis.get('imports', [])) 
+
+            context_section += f"File '{path_str}' (purposeCategory: {category_str}, imports: {imports_list_str}):\n"
             
-            for class_info in file_analysis['classes']:
-                context_section += f"  Class '{class_info['name']}':\n"
-                if class_info['docstring']:
-                    context_section += f"    Docstring: \"{class_info['docstring']}\"\n"
-                for method in class_info['methods']:
-                    context_section += f"    Method '{method['name']}':\n"
-                    if method['docstring']:
-                        context_section += f"      Docstring: \"{method['docstring']}\"\n"
-                    if method['parameters']:
-                        params = ", ".join(f"{p['name']} ({p['annotation']})" if p['annotation'] else p['name'] for p in method['parameters'])
-                        context_section += f"      Parameters: {params}\n"
+            # Iterate over classes, using .get() for all optional nested fields
+            for class_info in file_analysis.get('classes', []): # .get() for safety, though KB ensures it
+                class_name = class_info.get('name', 'Unnamed Class') # Use .get() for name
+                context_section += f"  Class '{class_name}':\n"
+                
+                class_docstring = class_info.get('docstring') # Safely get docstring
+                if class_docstring: # Check if the retrieved docstring is truthy
+                    context_section += f"    Docstring: \"{class_docstring}\"\n" # Use the safe variable
+                
+                for method_info in class_info.get('methods', []): # Use .get() for methods list
+                    method_name = method_info.get('name', 'Unnamed Method') # .get() for name
+                    context_section += f"    Method '{method_name}':\n"
+                    
+                    method_docstring = method_info.get('docstring') # Safely get docstring
+                    if method_docstring: # Check if the retrieved docstring is truthy
+                        context_section += f"      Docstring: \"{method_docstring}\"\n" # Use the safe variable
+                    
+                    parameters = method_info.get('parameters', []) # .get() for parameters list
+                    if parameters:
+                        param_strings = []
+                        for p_info in parameters: 
+                            p_name = p_info.get('name', 'param') # .get() for param name
+                            p_annotation = p_info.get('annotation') # .get() for param annotation
+                            if p_annotation:
+                                param_strings.append(f"{p_name} ({p_annotation})")
+                            else:
+                                param_strings.append(p_name)
+                        if param_strings:
+                             context_section += f"      Parameters: {', '.join(param_strings)}\n"
             
-            for func_info in file_analysis['functions']:
-                context_section += f"  Function '{func_info['name']}':\n"
-                if func_info['docstring']:
-                    context_section += f"    Docstring: \"{func_info['docstring']}\"\n"
-                if func_info['parameters']:
-                    params = ", ".join(f"{p['name']} ({p['annotation']})" if p['annotation'] else p['name'] for p in func_info['parameters'])
-                    context_section += f"    Parameters: {params}\n"
+            # Iterate over functions, using .get() for all optional nested fields
+            for func_info in file_analysis.get('functions', []): # .get() for safety
+                func_name = func_info.get('name', 'Unnamed Function') # .get() for name
+                context_section += f"  Function '{func_name}':\n"
+                
+                func_docstring = func_info.get('docstring') # Safely get docstring
+                if func_docstring: # Check if the retrieved docstring is truthy
+                    context_section += f"    Docstring: \"{func_docstring}\"\n" # Use the safe variable
+                
+                parameters = func_info.get('parameters', []) # .get() for parameters list
+                if parameters:
+                    param_strings = []
+                    for p_info in parameters:
+                        p_name = p_info.get('name', 'param') # .get() for param name
+                        p_annotation = p_info.get('annotation') # .get() for param annotation
+                        if p_annotation:
+                            param_strings.append(f"{p_name} ({p_annotation})")
+                        else:
+                            param_strings.append(p_name)
+                        if param_strings:
+                            context_section += f"    Parameters: {', '.join(param_strings)}\n"
         
         if unanalyzed_files:
             context_section += f"The following unanalyzed files were also part of this change: {unanalyzed_files}\n"
         context_section += "--- END AXLE INIT CONTEXT ---\n\n"
+    
     
     # Construct the messages for chat template
     # In your generate_commit_message function, update the 'messages'
@@ -236,6 +275,7 @@ def generate_commit_message(
             outputs = model.generate(
                 inputs["input_ids"],
                 max_new_tokens=250, # Increased slightly for potentially complex JSON structures or minor verbosity
+                attention_mask=inputs["attention_mask"],  
                 num_return_sequences=config["num_return_sequences"],
                 temperature=config["temperature"],
                 do_sample=True,
