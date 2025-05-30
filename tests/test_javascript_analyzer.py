@@ -121,7 +121,6 @@ class TestJavaScriptAnalyzer(unittest.TestCase):
 
         self.assertIsInstance(result, FileAnalysis)
         self.assertIsNotNone(result.functions)
-        # Corrected: Expect 2 functions from 'function' keyword declarations.
         # Arrow functions assigned to const/let/var are processed as variables,
         # or potentially added to functions list via expression_statement logic
         # if assigned to globals without const/let/var.
