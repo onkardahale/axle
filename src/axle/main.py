@@ -7,7 +7,7 @@ import os
 import subprocess 
 from pathlib import Path
 from . import __version__
-from .git_utils import is_git_installed, get_staged_diff, get_staged_file_paths
+from .git_utils import is_git_installed, get_staged_diff, get_staged_files_count, get_staged_file_paths
 from .commit_message import derive_scope
 from .editor_utils import open_editor
 from .ai_utils import generate_commit_message

@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 class Import(BaseModel):
     """Model for import statements."""
-    name: str
+    name: Optional[str] = None
     source: str
     items: Optional[List[str]] = None
 
@@ -30,7 +30,7 @@ class Attribute(BaseModel):
     """Model for class attributes."""
     name: str
     type: Optional[str] = None
-    static: bool = False
+    static: Optional[bool] = False
     docstring: Optional[str] = None
 
 class Class(BaseModel):

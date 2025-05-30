@@ -9,7 +9,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from . import BaseAnalyzer 
+from .base import BaseAnalyzer 
 from ..models import (
     FileAnalysis, Import, Class, Method, Function, Variable,
     Parameter, BaseClass, Attribute, Enum, EnumMember
