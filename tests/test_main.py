@@ -74,7 +74,7 @@ class TestMain(unittest.TestCase):
         """Test version flag."""
         result = self.runner.invoke(main, ['--version'])
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("axle 3.0.0", result.output)
+        self.assertIn("axle 3.1.0", result.output)
 
     def test_help_flag(self):
         result = self.runner.invoke(main, ['--help'])
