@@ -5,14 +5,14 @@ Axle is a command-line tool that helps you write better commit messages using AI
 ## Features
 
 - 🤖 AI-powered commit message generation using the Qwen2.5-Coder-3B-Instruct model
-- 📚 Local knowledge base for improved context-aware commit messages
+- 📚 Language-agnostic knowledge base for improved context-aware commit messages
 - 🔄 Interactive regeneration of commit messages with user context
 - 🔗 Issue linking and breaking change declarations
 - 💾 Automatic model caching for faster subsequent runs
 - 🛠️ Configurable generation parameters
 - 📚 Support for conventional commit types and scopes
 - 🌳 Tree-sitter based code parsing for better context understanding
-- 🌐 Extensible language support through tree-sitter grammars
+- 🌐 Multi-language support through tree-sitter grammars
 
 ## Installation
 
@@ -51,26 +51,125 @@ The `axle init` command creates a local knowledge base in the `.axle` directory 
 
 - Analyzes your codebase using tree-sitter for accurate parsing
 - Extracts structural information, docstrings, and imports
-- Categorizes files based on their purpose
+- Categorizes files based on their purpose and imports
 - Provides rich context for commit message generation
 - Supports multiple programming languages through tree-sitter grammars
+- Automatically detects and processes supported file types
+- Maintains a detailed log of analyzed and skipped files
 
 The knowledge base is automatically used when generating commit messages, leading to more accurate and contextually relevant messages.
 
 ### Language Support
 
-While Axle currently focuses on Python codebases, it's designed to be language-agnostic through its use of tree-sitter. The project uses `tree-sitter-language-pack` which provides built-in support for multiple languages. This architecture allows for easy expansion to support languages like:
-- JavaScript/TypeScript
-- Java
-- Go
-- Rust
-- C/C++
-- And many more
+Axle is designed to be language-agnostic through its use of tree-sitter. Currently, we have dedicated analyzers for:
 
-To add support for a new language, you can:
-1. Ensure the language is included in `tree-sitter-language-pack`
-2. Add language-specific parsing rules to the Axle project
-3. Configure the language parser in the knowledge base
+- Python (`.py`)
+- JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`)
+
+While the project uses `tree-sitter-language-pack` which provides grammar support for many languages, we need community contributions to add analyzers for additional languages. Languages that could be supported (but need analyzer implementation) include:
+
+- TypeScript (`.ts`, `.tsx`)
+- Java (`.java`)
+- Go (`.go`)
+- Rust (`.rs`)
+- C/C++ (`.c`, `.cpp`, `.h`, `.hpp`)
+- Ruby (`.rb`)
+- PHP (`.php`)
+- And many more through tree-sitter grammars
+
+The knowledge base automatically:
+- Detects file types based on extensions
+- Uses appropriate language-specific analyzers
+- Extracts language-specific constructs (classes, functions, imports, etc.)
+- Categorizes files based on their content and structure
+- Handles language-specific syntax and patterns
+
+### Contributing Language Analyzers
+
+We welcome contributions to add support for more languages! To add a new language analyzer:
+
+1. Create a new analyzer class in `src/axle/treesitter/analyzers/` following the pattern of existing analyzers
+2. Implement the required methods:
+   - `analyze_file()`: Main analysis method
+   - `_process_imports()`: Handle language-specific import statements
+   - `_process_classes()`: Extract class definitions and methods
+   - `_process_functions()`: Extract function definitions
+   - `_process_variables()`: Extract variable declarations
+
+3. Add the analyzer to the `TreeSitterParser` class in `src/axle/treesitter/parser.py`
+4. Add tests in `tests/test_<language>_analyzer.py`
+5. Update documentation
+
+Example structure for a new analyzer:
+```python
+from .base import BaseAnalyzer
+
+class NewLanguageAnalyzer(BaseAnalyzer):
+    """Analyzer for NewLanguage."""
+    
+    def __init__(self):
+        super().__init__("new_language")
+        self.extension_map = {
+            ".ext1": "new_language",
+            ".ext2": "new_language"
+        }
+    
+    def analyze_file(self, file_path: Path) -> FileAnalysis:
+        # Implementation
+        pass
+    
+    def _process_imports(self, tree: Tree) -> List[Import]:
+        # Implementation
+        pass
+    
+    # ... other required methods
+```
+
+Check out our existing analyzers for reference:
+- `javascript_analyzer.py`: JavaScript/JSX support
+- `python_analyzer.py`: Python support
+
+### File Categorization
+
+The knowledge base categorizes files based on their imports and path patterns. Here are the currently implemented categories:
+
+#### Import-based Categories
+Files are categorized based on their imported libraries and frameworks:
+
+- `web_framework`: Files importing web frameworks
+  - Python: Django, Flask
+  - JavaScript: React, Angular, Vue, Express
+
+- `test`: Files importing testing frameworks
+  - Python: pytest, unittest
+  - JavaScript: jest, mocha
+
+- `database`: Files importing database libraries
+  - Python: SQLAlchemy
+  - JavaScript: mongoose, sequelize
+
+- `data_processing`: Files importing data processing libraries
+  - Python: pandas, numpy
+
+- `ml`: Files importing machine learning libraries
+  - Python: tensorflow, torch, sklearn
+
+#### Path-based Categories
+Files are categorized based on their path and filename patterns:
+
+- `util`: Files in paths containing 'util', 'helper', or 'lib'
+- `test`: Files in paths containing 'test' or 'spec'
+- `config`: Files in paths containing 'config', 'conf', or 'setup'
+- `model`: Files in paths containing 'model' or 'schema'
+- `controller`: Files in paths containing 'controller', 'handler', 'router', or 'route'
+- `service`: Files in paths containing 'service'
+- `ui_component`: Files in paths containing 'component' or 'view'
+- `package_init`: Files named `__init__.py`
+- `entrypoint`: Files named:
+  - Python: `main.py`, `cli.py`
+  - JavaScript: `main.js`, `index.js`, `app.js`, `server.js`, `cli.js`
+
+Files that don't match any of these patterns are categorized as `unknown`.
 
 ## Interactive Features
 
