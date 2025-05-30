@@ -421,4 +421,374 @@ class JavaScriptAnalyzer(BaseAnalyzer):
         )
 
 
+    def _process_import_statement(self, node: Node, source_code: bytes) -> List[Import]:
+        imports: List[Import] = []
+
+        # _from_clause contains FIELD "source" (string).
+        # The import_statement can have _from_clause directly, or a "source" field for side-effect imports.
+        from_clause_node = None
+        for child in node.children: # Find _from_clause among direct children
+            if child.type == "_from_clause":
+                from_clause_node = child
+                break
+
+        source_node = node.child_by_field_name("source") # For side-effect: import "source";
+        if from_clause_node: # If from_clause exists, source is inside it
+            source_node = from_clause_node.child_by_field_name("source")
+
+        if not source_node:
+            return imports # Cannot proceed without a source
+        source_str = self._strip_string_quotes(self._get_node_text(source_node, source_code))
+
+        default_import_name: Optional[str] = None
+        named_items: List[str] = []
+        namespace_alias: Optional[str] = None
+
+        import_clause_node: Optional[Node] = None # Explicitly find import_clause
+        for child in node.children:
+            if child.type == "import_clause":
+                import_clause_node = child
+                break
+
+        if import_clause_node:
+            # import_clause -> CHOICE [ namespace_import, named_imports, SEQ[identifier, OPTIONAL_SEQ] ]
+            clause_content_node = import_clause_node.named_children[0] if import_clause_node.named_children else None
+            if not clause_content_node: # Should have one of the choices
+                 # Example: import_clause may directly be a 'namespace_import' or 'named_imports' node
+                 if import_clause_node.type in ('namespace_import', 'named_imports', 'identifier'): # If clause itself is the content type
+                     clause_content_node = import_clause_node
+                 # Or, if it's a SEQ, the first element is key for default import
+                 elif import_clause_node.children and import_clause_node.children[0].type == 'identifier':
+                     clause_content_node = import_clause_node # Treat the SEQ itself for default processing
+
+            if clause_content_node:
+                if clause_content_node.type == 'identifier': # Default import: import D from 'M'
+                    default_import_name = self._get_node_text(clause_content_node, source_code)
+                    # Check for named/namespace imports after default: import D, { A } or import D, * as N
+                    # The grammar is import_clause -> SEQ[identifier, OPTIONAL SEQ[",", CHOICE[namespace_import, named_imports]]]
+                    # So, if clause_content_node was the SEQ itself (due to above logic)
+                    if import_clause_node.children and len(import_clause_node.children) > 1:
+                        optional_part_node = import_clause_node.children[1] # This is the CHOICE node after comma
+                        if optional_part_node.named_children:
+                             additional_import_node = optional_part_node.named_children[0]
+                             if additional_import_node.type == 'named_imports':
+                                 # Populate named_items (logic as before)
+                                 for specifier in additional_import_node.named_children:
+                                     if specifier.type == "import_specifier":
+                                        # ... extract name/alias into named_items ... (see full method from prev. response)
+                                        name_field = specifier.child_by_field_name("name")
+                                        alias_field = specifier.child_by_field_name("alias")
+                                        item_text = ""
+                                        if alias_field: item_text = self._get_node_text(alias_field, source_code)
+                                        elif name_field: item_text = self._get_node_text(name_field, source_code)
+                                        if item_text: named_items.append(item_text)
+
+                             elif additional_import_node.type == 'namespace_import':
+                                 # Populate namespace_alias 
+                                 # namespace_import -> "*" "as" identifier
+                                 if len(additional_import_node.children) >= 3:
+                                     ns_id_node = additional_import_node.children[2] # The identifier part
+                                     if ns_id_node.type == 'identifier':
+                                          namespace_alias = self._get_node_text(ns_id_node, source_code)
+
+
+                elif clause_content_node.type == 'named_imports':
+                    for specifier in clause_content_node.named_children:
+                        if specifier.type == "import_specifier":
+                            name_field = specifier.child_by_field_name("name")    # This is _module_export_name (identifier or string)
+                            alias_field = specifier.child_by_field_name("alias") # This is identifier
+
+                            imported_as = ""
+                            original_name_str = self._get_node_text(name_field, source_code)
+
+                            if alias_field:
+                                imported_as = self._get_node_text(alias_field, source_code)
+                            else:
+                                imported_as = original_name_str
+
+                            # For 'import { default as ReactDOM }'
+                            if original_name_str == "default" and alias_field:
+                                default_import_name = imported_as # Treat as a default import
+                            else:
+                                if imported_as: named_items.append(imported_as)
+
+                elif clause_content_node.type == 'namespace_import':
+                    # namespace_import -> "*" "as" identifier
+                    if len(clause_content_node.children) >= 3 : # children are '*', 'as', identifier
+                        ns_id_node = clause_content_node.children[2]
+                        if ns_id_node.type == 'identifier':
+                            namespace_alias = self._get_node_text(ns_id_node, source_code)
+
+        # Create Import objects
+        if default_import_name:
+            imports.append(Import(name=default_import_name, source=source_str, items=named_items if named_items else None))
+        # Handle cases where named_items were collected but default_import_name was not set (e.g. pure named import)
+        elif named_items and not default_import_name and not namespace_alias:
+            imports.append(Import(name=None, source=source_str, items=named_items))
+
+        if namespace_alias and not default_import_name: # Ensure not to double count if default also had namespace
+            imports.append(Import(name=namespace_alias, source=source_str, items=["*"]))
+
+        # Side-effect import: `import 'module'`
+        # Grammar: import_statement -> "import" FIELD "source" string ...
+        if not import_clause_node and node.child_by_field_name("source"): # No clause, direct source field
+            imports.append(Import(name=None, source=source_str, items=None))
+
+        return imports
     
+    def _process_variable_declaration(self, node: Node, source_code: bytes) -> List[Variable]:
+        """Process a variable declaration statement (const, let, var)."""
+        variables = []
+        
+        declaration_kind_str = "external_variable" # Default, suitable for 'var' and 'let'
+        
+        if node.children:
+            first_child_node = node.children[0]
+            # Check the type of the first child, which is often the keyword node
+            first_child_type_str = first_child_node.type 
+            if first_child_type_str == "const": # tree-sitter often uses the keyword itself as the type
+                declaration_kind_str = "constant"
+            # 'let' and 'var' can map to "external_variable" as per current Pydantic Literal
+            elif first_child_type_str == "var":
+                 declaration_kind_str = "external_variable" # Or a more generic "variable" if model changes
+            elif first_child_type_str == "let":
+                 declaration_kind_str = "external_variable" # Changed from "lexical_variable"
+
+        # Fallback if the node type itself indicates the kind (e.g., "const_declaration")
+        elif node.type.startswith("const"): 
+             declaration_kind_str = "constant"
+        
+        for child_node in node.children:
+            if child_node.type == "variable_declarator":
+                declarator = child_node 
+                name_node = declarator.child_by_field_name("name")
+                value_node = declarator.child_by_field_name("value")
+
+                if name_node:
+                    name = self._get_node_text(name_node, source_code)
+                    value_str = None
+                    if value_node:
+                        value_str = self._get_node_text(value_node, source_code)
+                        if value_node.type in ("string_literal", "string", "template_string"):
+                             value_str = self._strip_string_quotes(value_str)
+
+                    variables.append(Variable(name=name, kind=declaration_kind_str, type=None, value=value_str))
+        return variables
+
+    def _process_export_statement(self, node: Node, source_code: bytes) -> List[Import]:
+        exports: List[Import] = []
+
+        # Grammar for export_statement is a CHOICE of two main SEQ patterns.
+        # Pattern 1: "export" (CHOICE ["*", namespace_export, export_clause]) (_from_clause)? _semicolon;
+        # Pattern 2: "export" (FIELD "declaration" | SEQ ["default", CHOICE [FIELD "declaration", FIELD "value" _semicolon]])
+
+        # Check children for keywords and structure
+        children = list(node.children)
+        
+        # Skip leading decorators if any for cleaner logic on keyword positions
+        start_index = 0
+        while start_index < len(children) and children[start_index].type == "decorator":
+            start_index += 1
+        
+        if start_index >= len(children) or children[start_index].type != 'export': # Should always start with "export" (after decorators)
+            return exports 
+
+        # Pattern 2: Handles `export default ...` and `export <declaration>`
+        # Check for "default" keyword after "export"
+        if (start_index + 1) < len(children) and children[start_index + 1].type == 'default': # export default ...
+            is_default_export = True
+            # The item exported is either a "declaration" field or a "value" field (expression)
+            # These fields are on the main export_statement node according to grammar.json
+            # for `export default declaration` or `export default value;`
+            declaration_node = node.child_by_field_name("declaration") # For `export default function/class Foo(){}`
+            value_node = node.child_by_field_name("value")             # For `export default myIdentifierOrExpr;`
+            
+            item_to_export_node = declaration_node or value_node
+
+            if item_to_export_node:
+                default_export_name = "default" 
+                source_name_for_default = "self" 
+
+                if item_to_export_node.type in ("function_declaration", "class_declaration"):
+                    name_field_node = item_to_export_node.child_by_field_name("name")
+                    if name_field_node: 
+                        declared_name = self._get_node_text(name_field_node, source_code)
+                        default_export_name = declared_name
+                        source_name_for_default = declared_name # For 'export default class MainService {}' -> source='MainService'
+                elif item_to_export_node.type == "identifier": 
+                    declared_name = self._get_node_text(item_to_export_node, source_code)
+                    default_export_name = declared_name
+                    source_name_for_default = declared_name 
+                
+                exports.append(Import(name=default_export_name, source=source_name_for_default, items=["default"]))
+            return exports
+
+        # Pattern 2 (continued): `export <declaration>` (no "default" keyword)
+        declaration_node_non_default = node.child_by_field_name("declaration")
+        if declaration_node_non_default:
+            if declaration_node_non_default.type in ("lexical_declaration", "variable_declaration"):
+                temp_vars = self._process_variable_declaration(declaration_node_non_default, source_code)
+                for var_info in temp_vars:
+                    exports.append(Import(name=var_info.name, source="self", items=[var_info.name]))
+            elif declaration_node_non_default.type in ("function_declaration", "class_declaration"):
+                name_node = declaration_node_non_default.child_by_field_name("name")
+                if name_node:
+                    name_str = self._get_node_text(name_node, source_code)
+                    exports.append(Import(name=name_str, source="self", items=[name_str]))
+            return exports
+
+        # Pattern 1: Handles `export * ...`, `export namespace ...`, `export { ... }`
+        # Structure: "export" (CHOICE) (_from_clause)? _semicolon
+        # The CHOICE node is children[start_index + 1]
+        
+        choice_node_after_export: Optional[Node] = None
+        if (start_index + 1) < len(children):
+            choice_node_after_export = children[start_index + 1]
+        
+        from_clause_node: Optional[Node] = None # _from_clause contains FIELD "source" string
+        # _from_clause is a sibling to the choice_node_after_export or part of its SEQ members
+        # The grammar shows _from_clause can follow '*', namespace_export, or export_clause.
+        
+        # Try finding _from_clause directly on the export_statement node
+        # Grammar: _from_clause -> "from" FIELD "source" string
+        # This might not be a field on export_statement itself, but part of a SEQ.
+
+        # Find export_clause and _from_clause by iterating children of the main 'node'
+        actual_export_clause_node: Optional[Node] = None
+        actual_from_clause_node: Optional[Node] = None
+        star_literal_node: Optional[Node] = None
+        namespace_export_symbol_node: Optional[Node] = None
+
+        for child in node.children: # Iterate children of the main 'export_statement' node
+            if child.type == "export_clause":
+                actual_export_clause_node = child
+            elif child.type == "_from_clause": # This node contains the source string for re-exports
+                actual_from_clause_node = child
+            elif child.type == '"*"': # string literal "*"
+                star_literal_node = child
+            elif child.type == "namespace_export": # For * as ns
+                 namespace_export_symbol_node = child
+
+
+        if actual_export_clause_node:
+            # export_clause -> "{" REPEAT(export_specifier) "}"
+            # export_specifier -> FIELD "name" _module_export_name [ "as" FIELD "alias" _module_export_name ]
+            exported_items_list = []
+            for specifier_node in actual_export_clause_node.children:
+                if specifier_node.type == "export_specifier":
+                    name_field_node = specifier_node.child_by_field_name("name") # _module_export_name
+                    alias_field_node = specifier_node.child_by_field_name("alias") # _module_export_name
+                    
+                    item_name_to_add = ""
+                    if alias_field_node: # export { name as alias } -> alias is exported name
+                        item_name_to_add = self._get_node_text(alias_field_node, source_code)
+                    elif name_field_node: # export { name } -> name is exported name
+                        item_name_to_add = self._get_node_text(name_field_node, source_code)
+                    
+                    if item_name_to_add:
+                        exported_items_list.append(item_name_to_add)
+            
+            if exported_items_list:
+                module_source_str = "self"
+                if actual_from_clause_node:
+                    source_ident_node = actual_from_clause_node.child_by_field_name("source") # This is a 'string' node
+                    if source_ident_node:
+                         module_source_str = self._strip_string_quotes(self._get_node_text(source_ident_node, source_code))
+                
+                exports.append(Import(
+                    name=None if module_source_str == "self" else module_source_str, 
+                    source=module_source_str, 
+                    items=exported_items_list
+                ))
+            return exports
+
+        # Handling `export * from 'module'` or `export * as namespace from 'module'`
+        # export_statement -> "export" "*" _from_clause
+        # export_statement -> "export" namespace_export _from_clause
+        if (star_literal_node or namespace_export_symbol_node) and actual_from_clause_node:
+            source_ident_node = actual_from_clause_node.child_by_field_name("source")
+            if source_ident_node:
+                module_source_str = self._strip_string_quotes(self._get_node_text(source_ident_node, source_code))
+                if namespace_export_symbol_node: # export * as ns from 'module'
+                    # namespace_export -> "*" "as" _module_export_name (identifier)
+                    # The third child of namespace_export is the identifier for 'ns'
+                    if len(namespace_export_symbol_node.children) >= 3:
+                        ns_alias_node = namespace_export_symbol_node.children[2] # _module_export_name
+                        if ns_alias_node: # Check if it's identifier or string
+                             ns_name = self._get_node_text(ns_alias_node, source_code)
+                             exports.append(Import(name=ns_name, source=module_source_str, items=[f"* as {ns_name}"])) # Or just items=["*"]
+                elif star_literal_node: # export * from 'module'
+                    exports.append(Import(name=module_source_str, source=module_source_str, items=["*"]))
+            return exports
+            
+        return exports
+
+    def _analyze_tree(self, tree: Tree, source_code: bytes, file_path: Path) -> FileAnalysis:
+        """Analyze the JavaScript syntax tree and return structured data."""
+        root = tree.root_node
+        logger.debug(f"Starting analysis for: {file_path}")
+        
+        analysis = FileAnalysis(
+            file_path=str(file_path),
+            analyzer="treesitter_javascript", # Use direct string
+            imports=[],
+            classes=[],
+            functions=[],
+            variables=[],
+            enums=None 
+        )
+        
+        top_level_nodes = root.children if root else [] # Check if root exists
+        for node in top_level_nodes:
+            node_type = node.type
+            if node_type == "import_statement":
+                imports_list = self._process_import_statement(node, source_code)
+                if imports_list: analysis.imports.extend(imports_list)
+            elif node_type == "export_statement":
+                # _process_export_statement should return a list of Import-like objects
+                # These represent what's being made available by the module.
+                exports_list = self._process_export_statement(node, source_code)
+                if exports_list: analysis.imports.extend(exports_list) # Storing exports in the 'imports' field for now
+            elif node_type == "class_declaration":
+                class_obj = self._process_class_declaration(node, source_code)
+                if class_obj: analysis.classes.append(class_obj)
+            elif node_type == "function_declaration": # Handles `function foo() {}`
+                func_obj = self._process_function_declaration(node, source_code)
+                if func_obj: analysis.functions.append(func_obj)
+            elif node_type in ("lexical_declaration", "variable_declaration"): # Common for const, let, var
+                vars_list = self._process_variable_declaration(node, source_code)
+                if vars_list: 
+                    for var_obj in vars_list: # Check if any variable is an arrow function
+                        # This requires inspecting var_obj.value or the original value_node
+                        # For simplicity, this example doesn't convert arrow func vars to Function objects here.
+                        # That logic was previously in _analyze_tree's expression_statement part.
+                        analysis.variables.append(var_obj)
+            elif node_type == "expression_statement":
+                # Handles assignments like `myGlobal = () => {}` if not a const/let/var declaration
+                if node.named_children: # Or node.children
+                    expression_child_node = node.named_children[0] # Or node.children[0]
+                    if expression_child_node.type == "assignment_expression": # Or "assignment"
+                        target_node = expression_child_node.child_by_field_name("left")
+                        value_node = expression_child_node.child_by_field_name("right")
+                        
+                        if target_node and target_node.type == "identifier" and \
+                           value_node and value_node.type == "arrow_function":
+                            name = self._get_node_text(target_node, source_code)
+                            parameters_node = value_node.child_by_field_name("parameters")
+                            parameters = self._process_parameters(parameters_node, source_code, m_name=name)
+                            
+                            func_obj = Function(
+                                name=name,
+                                parameters=parameters or None,
+                                docstring=self._get_jsdoc_comment(value_node, source_code), # JSDoc on arrow func
+                                calls=[]
+                            )
+                            if func_obj: analysis.functions.append(func_obj)
+        
+        # Set lists to None if they are empty, as per Pydantic model (Optional fields)
+        if not analysis.imports: analysis.imports = None
+        if not analysis.classes: analysis.classes = None
+        if not analysis.functions: analysis.functions = None
+        if not analysis.variables: analysis.variables = None
+        
+        return analysis
