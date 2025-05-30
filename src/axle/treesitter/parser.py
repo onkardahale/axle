@@ -7,6 +7,7 @@ from typing import Dict, Type, Optional
 
 from .analyzers import BaseAnalyzer
 from .analyzers.python_analyzer import PythonAnalyzer
+from .analyzers.javascript_analyzer import JavaScriptAnalyzer
 from .models import FileAnalysis, FailedAnalysis
 from .exceptions import TreeSitterError, GrammarError
 
@@ -19,8 +20,8 @@ class TreeSitterParser:
         """Initialize the parser with available language analyzers."""
         self.analyzers: Dict[str, Type[BaseAnalyzer]] = {
             "python": PythonAnalyzer,
+            "javascript": JavaScriptAnalyzer,
             # TODO: Add other language analyzers as they are implemented
-            # "javascript": JavaScriptAnalyzer,
             # "go": GoAnalyzer,
             # "cpp": CppAnalyzer,
         }
