@@ -3,11 +3,11 @@
 import sys
 import click
 import tempfile 
-import os       
-import subprocess 
+import os
+import subprocess
 from pathlib import Path
 from . import __version__
-from .git_utils import is_git_installed, get_staged_diff, get_staged_files_count, get_staged_file_paths
+from .git_utils import is_git_installed, get_staged_diff, get_staged_files_count, get_staged_file_paths, get_changed_files_from_diff
 from .commit_message import derive_scope
 from .editor_utils import open_editor
 from .ai_utils import generate_commit_message
@@ -66,6 +66,8 @@ def commit(regenerate):
         sys.exit(0)
 
     staged_files = get_staged_file_paths()
+    # Get the list of files that actually have changes from the diff
+    changed_files_in_diff = get_changed_files_from_diff(diff)
     scope = derive_scope(staged_files)
 
     # Initialize knowledge base
@@ -82,6 +84,9 @@ def commit(regenerate):
     context = []
     unanalyzed_files = []
     for file_path in staged_files:
+        # Only get analysis for files that are in the diff
+        if file_path not in changed_files_in_diff:
+            continue
         rel_path = Path(file_path)
         analysis = kb.get_file_analysis(rel_path)
         if analysis:

@@ -39,4 +39,30 @@ def get_staged_file_paths():
             return []
         return [line.strip() for line in result.stdout.splitlines() if line.strip()]
     except Exception:
-        return [] 
+        return []
+
+
+def get_changed_files_from_diff(diff_content: str) -> list[str]:
+    """
+    Parses the diff content and returns a list of file paths that have actual changes.
+    It looks for lines like 'diff --git a/path/to/file.py b/path/to/file.py'
+    and extracts 'path/to/file.py'.
+    """
+    changed_files = set()
+    if not diff_content:
+        return []
+
+    for line in diff_content.splitlines():
+        if line.startswith("diff --git a/"):
+            try:
+                # Example: diff --git a/src/axle/main.py b/src/axle/main.py
+                # We want to extract "src/axle/main.py"
+                parts = line.split(" ") # ["diff", "--git", "a/path/to/file.py", "b/path/to/file.py"]
+                file_path_a = parts[2] # "a/path/to/file.py"
+                # Remove the "a/" prefix
+                if file_path_a.startswith("a/"):
+                    changed_files.add(file_path_a[2:])
+            except IndexError:
+                # Handle cases where the line might not be structured as expected, though unlikely for valid diffs
+                continue
+    return list(changed_files)
