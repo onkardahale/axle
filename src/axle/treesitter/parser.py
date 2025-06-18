@@ -8,6 +8,8 @@ from typing import Dict, Type, Optional
 from .analyzers import BaseAnalyzer
 from .analyzers.python_analyzer import PythonAnalyzer
 from .analyzers.javascript_analyzer import JavaScriptAnalyzer
+from .analyzers.cpp_analyzer import CppAnalyzer
+from .analyzers.julia_analyzer import JuliaAnalyzer
 from .models import FileAnalysis, FailedAnalysis
 from .exceptions import TreeSitterError, GrammarError
 
@@ -21,9 +23,10 @@ class TreeSitterParser:
         self.analyzers: Dict[str, Type[BaseAnalyzer]] = {
             "python": PythonAnalyzer,
             "javascript": JavaScriptAnalyzer,
+            "cpp": CppAnalyzer,
+            "julia": JuliaAnalyzer,
             # TODO: Add other language analyzers as they are implemented
             # "go": GoAnalyzer,
-            # "cpp": CppAnalyzer,
         }
         
         # Map file extensions to analyzer classes
