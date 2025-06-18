@@ -1,12 +1,16 @@
 import os
-from typing import Optional, Tuple
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from typing import Optional, Tuple, List
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import torch
 from transformers.utils import logging
 import json
 from pathlib import Path
-import re 
-import time 
+import instructor
+from pydantic import BaseModel, Field
+from functools import lru_cache
+from jinja2 import Environment, FileSystemLoader
+import re
+import time
 
 # Set tokenizers parallelism to false to avoid warnings
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -26,6 +30,12 @@ class EditorError(Exception):
     """Raised when there's an error with the editor interaction."""
     pass
 
+class CommitMessage(BaseModel):
+    type: str = Field(..., description=f"The type of change. Must be one of: {', '.join(ALLOWED_TYPES)}")
+    scope: Optional[str] = Field(None, description="The scope of the change (e.g., a file or directory name).")
+    description: str = Field(..., description="A short, imperative tense description of the change.")
+    body: Optional[str] = Field(None, description="A longer, more detailed description of the change.")
+
 def get_cache_dir() -> Path:
     """Get the cache directory for models and configurations."""
     cache_dir = Path.home() / ".cache" / "axle"
@@ -42,7 +52,8 @@ def get_model_config() -> dict:
         "model_name": "Qwen/Qwen2.5-Coder-3B-Instruct",
         "temperature": 0.2,
         "top_p": 0.95,
-        "num_return_sequences": 1
+        "num_return_sequences": 1,
+        "quantization": "8bit"
     }
     
     if config_path.exists():
@@ -63,7 +74,7 @@ def save_model_config(config: dict):
     except IOError as e:
         RuntimeError(f"Warning: Could not save model_config.json: {str(e)}")
 
-
+@lru_cache(maxsize=1)
 def get_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     """
     Get the model and tokenizer for commit message generation.
@@ -78,8 +89,25 @@ def get_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     model_name = config["model_name"]
     cache_dir_models = get_cache_dir() / "models"
     
+    # Configure quantization
+    quantization_type = config.get("quantization", "none")
+    quantization_config = None
+    
+    if quantization_type == "8bit":
+        quantization_config = BitsAndBytesConfig(
+            load_in_8bit=True,
+            llm_int8_threshold=6.0,
+            llm_int8_has_fp16_weight=False,
+        )
+    elif quantization_type == "4bit":
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+        )
+    
     try:
-        
         tokenizer = AutoTokenizer.from_pretrained(
             model_name,
             cache_dir=str(cache_dir_models), # cache_dir expects a string
@@ -92,9 +120,11 @@ def get_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
             cache_dir=str(cache_dir_models), # cache_dir expects a string
             trust_remote_code=True,
             local_files_only=False,
-            torch_dtype=torch.float16,
-            device_map="auto"
+            quantization_config=quantization_config,
+            device_map="auto",
+            torch_dtype=torch.float16 if quantization_config is None else None,
         )
+        
         # Set padding token if not set, common for generation
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -104,6 +134,38 @@ def get_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
         
     except Exception as e:
         raise ModelLoadError(f"Failed to load model or tokenizer: {str(e)}")
+
+def _render_prompt(template_name: str, **kwargs) -> str:
+    """Renders a Jinja2 prompt template."""
+    prompt_dir = Path(__file__).parent / "prompts"
+    env = Environment(loader=FileSystemLoader(prompt_dir))
+    template = env.get_template(template_name)
+    return template.render(**kwargs)
+
+def _format_context(context: list, unanalyzed_files: list) -> str:
+    """Formats the knowledge base context for the prompt."""
+    if not context and not unanalyzed_files:
+        return ""
+
+    context_section = "--- BEGIN AXLE INIT CONTEXT ---\n"
+    for file_analysis in context:
+        path_str = file_analysis.get('path', 'Unknown File')
+        category_str = file_analysis.get('category', 'N/A')
+        imports_list_str = str(file_analysis.get('imports', []))
+        context_section += f"File '{path_str}' (purposeCategory: {category_str}, imports: {imports_list_str}):\n"
+        
+        for class_info in file_analysis.get('classes', []):
+            context_section += f"  Class '{class_info.get('name', 'Unnamed Class')}': {class_info.get('docstring', '')}\n"
+            for method_info in class_info.get('methods', []):
+                context_section += f"    Method '{method_info.get('name', 'Unnamed Method')}': {method_info.get('docstring', '')}\n"
+        
+        for func_info in file_analysis.get('functions', []):
+            context_section += f"  Function '{func_info.get('name', 'Unnamed Function')}': {func_info.get('docstring', '')}\n"
+
+    if unanalyzed_files:
+        context_section += f"The following unanalyzed files were also part of this change: {unanalyzed_files}\n"
+    context_section += "--- END AXLE INIT CONTEXT ---\n"
+    return context_section
 
 def generate_commit_message(
     diff: str,
@@ -141,236 +203,175 @@ def generate_commit_message(
     
     config = get_model_config()
     
-    # Construct context section if available
-    context_section = ""
-    if context:
-        context_section = "--- BEGIN AXLE INIT CONTEXT ---\n"
-        for file_analysis in context: # 'context' is a list of 'file_analysis' dicts
-            # Previous fixes in KnowledgeBase ensure 'path', 'category', 'imports', 
-            # 'classes', 'functions' keys exist at this top level of file_analysis.
-            path_str = file_analysis.get('path', 'Unknown File') 
-            category_str = file_analysis.get('category', 'N/A')
-            imports_list_str = str(file_analysis.get('imports', [])) 
+    context_section = _format_context(context, unanalyzed_files)
+    
+    prompt = _render_prompt(
+        "commit_message.jinja",
+        allowed_types=ALLOWED_TYPES,
+        context_section=context_section,
+        diff=diff,
+        additional_context=additional_context,
+        scope=scope
+    )
 
-            context_section += f"File '{path_str}' (purposeCategory: {category_str}, imports: {imports_list_str}):\n"
-            
-            # Iterate over classes, using .get() for all optional nested fields
-            for class_info in file_analysis.get('classes', []): # .get() for safety, though KB ensures it
-                class_name = class_info.get('name', 'Unnamed Class') # Use .get() for name
-                context_section += f"  Class '{class_name}':\n"
-                
-                class_docstring = class_info.get('docstring') # Safely get docstring
-                if class_docstring: # Check if the retrieved docstring is truthy
-                    context_section += f"    Docstring: \"{class_docstring}\"\n" # Use the safe variable
-                
-                for method_info in class_info.get('methods', []): # Use .get() for methods list
-                    method_name = method_info.get('name', 'Unnamed Method') # .get() for name
-                    context_section += f"    Method '{method_name}':\n"
-                    
-                    method_docstring = method_info.get('docstring') # Safely get docstring
-                    if method_docstring: # Check if the retrieved docstring is truthy
-                        context_section += f"      Docstring: \"{method_docstring}\"\n" # Use the safe variable
-                    
-                    parameters = method_info.get('parameters', []) # .get() for parameters list
-                    if parameters:
-                        param_strings = []
-                        for p_info in parameters: 
-                            p_name = p_info.get('name', 'param') # .get() for param name
-                            p_annotation = p_info.get('annotation') # .get() for param annotation
-                            if p_annotation:
-                                param_strings.append(f"{p_name} ({p_annotation})")
-                            else:
-                                param_strings.append(p_name)
-                        if param_strings:
-                             context_section += f"      Parameters: {', '.join(param_strings)}\n"
-            
-            # Iterate over functions, using .get() for all optional nested fields
-            for func_info in file_analysis.get('functions', []): # .get() for safety
-                func_name = func_info.get('name', 'Unnamed Function') # .get() for name
-                context_section += f"  Function '{func_name}':\n"
-                
-                func_docstring = func_info.get('docstring') # Safely get docstring
-                if func_docstring: # Check if the retrieved docstring is truthy
-                    context_section += f"    Docstring: \"{func_docstring}\"\n" # Use the safe variable
-                
-                parameters = func_info.get('parameters', []) # .get() for parameters list
-                if parameters:
-                    param_strings = []
-                    for p_info in parameters:
-                        p_name = p_info.get('name', 'param') # .get() for param name
-                        p_annotation = p_info.get('annotation') # .get() for param annotation
-                        if p_annotation:
-                            param_strings.append(f"{p_name} ({p_annotation})")
-                        else:
-                            param_strings.append(p_name)
-                        if param_strings:
-                            context_section += f"    Parameters: {', '.join(param_strings)}\n"
-        
-        if unanalyzed_files:
-            context_section += f"The following unanalyzed files were also part of this change: {unanalyzed_files}\n"
-        context_section += "--- END AXLE INIT CONTEXT ---\n\n"
-    
-    
-    # Construct the messages for chat template
-    # In your generate_commit_message function, update the 'messages'
     messages = [
-        {"role": "system", "content": f"""You are an expert in Conventional Commits. Your task is to generate commit messages strictly in JSON format based on git diffs and any provided code context.
-    You MUST output a single, valid JSON object and NOTHING ELSE. Do not include any explanatory text before or after the JSON object itself.
-    The 'description' should be a concise high-level summary. If there are multiple distinct changes or important details, elaborate on them in the 'body' field.
-    Allowed types for the 'type' field: {', '.join(ALLOWED_TYPES)}"""},
-        {"role": "user", "content": f"""Analyze the provided context and git diff, then generate a commit message in JSON format.
-
-    {context_section} 
-    --- BEGIN GIT DIFF ---
-    {diff}
-    --- END GIT DIFF ---
-
-    {additional_context if additional_context else ''} 
-
-    Scope for the commit (use this if relevant, otherwise determine from context or set to null): {scope if scope else 'general'}
-
-    **Output Adherence Rules:**
-    1. Your entire response MUST be a single, valid JSON object.
-    2. Do NOT include any text, comments, or explanations before or after the JSON object.
-    3. The JSON object MUST contain these fields:
-    - `type`: string (one of {', '.join(ALLOWED_TYPES)})
-    - `scope`: string (short, lowercase noun) or null
-    - `description`: string (concise, imperative, high-level summary starting with a verb, NOT empty)
-    - `body`: string (detailed explanation, can be multi-line with '\\n' for newlines, or null if not needed. Use this to list multiple distinct changes or provide more context.)
-    4. Ensure all string values within the JSON are properly escaped.
-
-    **JSON Schema Example (with a body):**
-    {{
-        "type": "refactor",
-        "scope": "ai_utils",
-        "description": "optimize model parameters and prompt structure",
-        "body": "Key improvements made to AI generation module:\n- Adjusted model temperature to 0.2 for more predictable output.\n- Increased maximum token limit to support more complex diffs.\n- Updated the system prompt to provide clearer instructions for JSON formatting."
-    }}
-
-    Your response (A single, valid JSON object ONLY):"""}
+        {"role": "user", "content": prompt}
     ]
       
     try:
-        # Apply chat template
-        text = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
-        
-        # Tokenize the prompt
-        inputs = tokenizer(text, return_tensors="pt", max_length=32768, truncation=True)
-        
-        if hasattr(model, 'device'):
-            inputs = {k: v.to(model.device) for k, v in inputs.items()}
-        
-        if regenerate:
-            # Increase temperature for more variation, but cap at a conservative maximum to avoid
-            # probability tensor issues (inf, nan, or negative values)
-            config["temperature"] = min(0.6, config["temperature"] + 0.05)
-            config["temperature"] = max(0.1, config["temperature"])
-            print(f"Regenerating with temperature: {config['temperature']:.2f}")
-            save_model_config(config)
-
-        # Validate generation parameters to prevent tensor issues
-        temperature = float(config["temperature"])
-        top_p = float(config["top_p"])
-        num_return_sequences = int(config["num_return_sequences"])
-        
-        # Ensure parameters are within safe ranges
-        if not (0.01 <= temperature <= 0.6):
-            print(f"Warning: Invalid temperature {temperature}, clamping to safe range")
-            temperature = max(0.01, min(0.6, temperature))
-        if not (0.01 <= top_p <= 0.95):
-            print(f"Warning: Invalid top_p {top_p}, clamping to safe range")
-            top_p = max(0.01, min(0.95, top_p))
-        if num_return_sequences < 1:
-            print(f"Warning: Invalid num_return_sequences {num_return_sequences}, setting to 1")
-            num_return_sequences = 1
+        # Create a chat completion function that works with Hugging Face models
+        def create_chat_completion(**kwargs):
+            messages = kwargs.get("messages", [])
+            max_tokens = kwargs.get("max_tokens", 250)
             
-        # Check for NaN or infinite values
-        if not (torch.isfinite(torch.tensor(temperature)) and torch.isfinite(torch.tensor(top_p))):
-            raise GenerationError("Invalid generation parameters: temperature or top_p contains NaN or infinite values")
-        
-        # Debug logging for parameter values
-        print(f"Debug: Using parameters - temperature: {temperature}, top_p: {top_p}, num_return_sequences: {num_return_sequences}")
-        
-        with torch.no_grad():
-            start_time = time.perf_counter()  # Start timing
-            outputs = model.generate(
-                inputs["input_ids"],
-                max_new_tokens=250, # Increased slightly for potentially complex JSON structures or minor verbosity
-                attention_mask=inputs["attention_mask"],  
-                num_return_sequences=num_return_sequences,
-                temperature=temperature,
-                do_sample=True,
-                top_p=top_p,
-                pad_token_id=tokenizer.eos_token_id
+            # Apply chat template
+            text = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
             )
-            end_time = time.perf_counter()  # End timing
-            inference_duration_ms = (end_time - start_time) * 1000  # Convert to milliseconds
-        
-        # Decode only the newly generated tokens
-        input_length = inputs["input_ids"].shape[1]
-        generated_tokens = outputs[0][input_length:]
-        print(f"Inference information: {inference_duration_ms:.2f} ms, {1000*len(outputs[0])/inference_duration_ms} tokens/sec") 
-   
-        completion = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
-        
-        # ---- Robust JSON Extraction Logic ----
-        extracted_json_string = None
-
-        # 1. Try to find JSON within ```json ... ``` markdown
-        markdown_match = re.search(r"```(?:json|JSON)?\s*(\{[\s\S]*?\})\s*```", completion, re.IGNORECASE)
-        if markdown_match:
-            extracted_json_string = markdown_match.group(1).strip()
-        else:
-            # 2. If no markdown, try to find the last occurrence of a string that looks like a JSON object
-            last_brace_open_idx = completion.rfind('{')
-            if last_brace_open_idx != -1:
-                # Attempt to find the matching closing brace for the last open brace
-                open_brace_count = 0
-                json_candidate_segment = completion[last_brace_open_idx:]
-                
-                if json_candidate_segment.strip().startswith('{'): # Basic sanity check
-                    end_brace_idx_in_segment = -1
-                    for i, char in enumerate(json_candidate_segment):
-                        if char == '{':
-                            open_brace_count += 1
-                        elif char == '}':
-                            open_brace_count -= 1
-                            if open_brace_count == 0:
-                                end_brace_idx_in_segment = i
-                                break
-                    
-                    if end_brace_idx_in_segment != -1:
-                        extracted_json_string = json_candidate_segment[:end_brace_idx_in_segment+1].strip()
             
-            # 3. (Optional) As a very last resort, if no specific structure found, 
-            #    and the whole completion might be JSON. Be cautious with this.
+            # Tokenize the prompt
+            inputs = tokenizer(text, return_tensors="pt", max_length=32768, truncation=True)
+            
+            if hasattr(model, 'device'):
+                inputs = {k: v.to(model.device) for k, v in inputs.items()}
+            
+            if regenerate:
+                # Increase temperature for more variation, but cap at a conservative maximum to avoid
+                # probability tensor issues (inf, nan, or negative values)
+                config["temperature"] = min(0.6, config["temperature"] + 0.05)
+                config["temperature"] = max(0.1, config["temperature"])
+                print(f"Regenerating with temperature: {config['temperature']:.2f}")
+                save_model_config(config)
+
+            # Validate generation parameters to prevent tensor issues
+            temperature = float(config["temperature"])
+            top_p = float(config["top_p"])
+            num_return_sequences = int(config["num_return_sequences"])
+            
+            # Ensure parameters are within safe ranges
+            if not (0.01 <= temperature <= 0.6):
+                print(f"Warning: Invalid temperature {temperature}, clamping to safe range")
+                temperature = max(0.01, min(0.6, temperature))
+            if not (0.01 <= top_p <= 0.95):
+                print(f"Warning: Invalid top_p {top_p}, clamping to safe range")
+                top_p = max(0.01, min(0.95, top_p))
+            if num_return_sequences < 1:
+                print(f"Warning: Invalid num_return_sequences {num_return_sequences}, setting to 1")
+                num_return_sequences = 1
+                
+            # Check for NaN or infinite values
+            if not (torch.isfinite(torch.tensor(temperature)) and torch.isfinite(torch.tensor(top_p))):
+                raise GenerationError("Invalid generation parameters: temperature or top_p contains NaN or infinite values")
+            
+            # Debug logging for parameter values
+            print(f"Debug: Using parameters - temperature: {temperature}, top_p: {top_p}, num_return_sequences: {num_return_sequences}")
+            
+            with torch.no_grad():
+                start_time = time.perf_counter()  # Start timing
+                outputs = model.generate(
+                    inputs["input_ids"],
+                    max_new_tokens=max_tokens, # Increased slightly for potentially complex JSON structures or minor verbosity
+                    attention_mask=inputs["attention_mask"],  
+                    num_return_sequences=num_return_sequences,
+                    temperature=temperature,
+                    do_sample=True,
+                    top_p=top_p,
+                    pad_token_id=tokenizer.eos_token_id
+                )
+                end_time = time.perf_counter()  # End timing
+                inference_duration_ms = (end_time - start_time) * 1000  # Convert to milliseconds
+            
+            # Decode only the newly generated tokens
+            input_length = inputs["input_ids"].shape[1]
+            generated_tokens = outputs[0][input_length:]
+            print(f"Inference information: {inference_duration_ms:.2f} ms, {1000*len(outputs[0])/inference_duration_ms} tokens/sec") 
+       
+            completion = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+            
+            # ---- Robust JSON Extraction Logic ----
+            extracted_json_string = None
+
+            # 1. Try to find JSON within ```json ... ``` markdown
+            markdown_match = re.search(r"```(?:json|JSON)?\s*(\{[\s\S]*?\})\s*```", completion, re.IGNORECASE)
+            if markdown_match:
+                extracted_json_string = markdown_match.group(1).strip()
+            else:
+                # 2. If no markdown, try to find the last occurrence of a string that looks like a JSON object
+                last_brace_open_idx = completion.rfind('{')
+                if last_brace_open_idx != -1:
+                    # Attempt to find the matching closing brace for the last open brace
+                    open_brace_count = 0
+                    json_candidate_segment = completion[last_brace_open_idx:]
+                    
+                    if json_candidate_segment.strip().startswith('{'): # Basic sanity check
+                        end_brace_idx_in_segment = -1
+                        for i, char in enumerate(json_candidate_segment):
+                            if char == '{':
+                                open_brace_count += 1
+                            elif char == '}':
+                                open_brace_count -= 1
+                                if open_brace_count == 0:
+                                    end_brace_idx_in_segment = i
+                                    break
+                        
+                        if end_brace_idx_in_segment != -1:
+                            extracted_json_string = json_candidate_segment[:end_brace_idx_in_segment+1].strip()
+                
+                # 3. (Optional) As a very last resort, if no specific structure found, 
+                #    and the whole completion might be JSON. Be cautious with this.
+                if extracted_json_string is None:
+                    temp_completion_stripped = completion.strip()
+                    if temp_completion_stripped.startswith('{') and temp_completion_stripped.endswith('}'):
+                        # Try to parse, it might be a simple JSON output without any wrapping
+                        extracted_json_string = temp_completion_stripped
+            # ---- End of Robust JSON Extraction Logic ----
+
             if extracted_json_string is None:
-                temp_completion_stripped = completion.strip()
-                if temp_completion_stripped.startswith('{') and temp_completion_stripped.endswith('}'):
-                    # Try to parse, it might be a simple JSON output without any wrapping
-                    extracted_json_string = temp_completion_stripped
-        # ---- End of Robust JSON Extraction Logic ----
-
-        if extracted_json_string is None:
-            raise GenerationError(f"Could not extract a clear JSON object from the model's output. Raw completion: '{completion[:500]}...'")
+                raise GenerationError(f"Could not extract a clear JSON object from the model's output. Raw completion: '{completion[:500]}...'")
+            
+            # Create a mock response object that matches instructor's expectations
+            class MockResponse:
+                def __init__(self, content):
+                    self.choices = [MockChoice(content)]
+                    self.model = "local-model"
+                    self.usage = None
+            
+            class MockChoice:
+                def __init__(self, content):
+                    self.message = MockMessage(content)
+                    self.finish_reason = "stop"
+                    self.index = 0
+            
+            class MockMessage:
+                def __init__(self, content):
+                    self.content = content
+                    self.role = "assistant"
+                    self.function_call = None
+                    self.tool_calls = None
+            
+            return MockResponse(extracted_json_string)
         
-        try:
-            commit_data = json.loads(extracted_json_string)
-        except json.JSONDecodeError as e:
-            raise GenerationError(f"Failed to parse JSON from model: {str(e)}. Extracted JSON string was: '{extracted_json_string}'")
+        # Use instructor with the custom completion function
+        client = instructor.patch(create=create_chat_completion, mode=instructor.Mode.JSON)
 
-        type_ = commit_data.get("type", "feat")
+        commit_message: CommitMessage = client(
+            messages=messages,
+            response_model=CommitMessage,
+            max_retries=1,
+            max_tokens=250,
+        )
+
+        # Format the commit message using the original logic
+        type_ = commit_message.type
         if type_ not in ALLOWED_TYPES:
             print(f"Warning: Invalid commit type '{type_}' received from model. Defaulting to 'feat'.")
             type_ = "feat"
 
-        scope_ = commit_data.get("scope")
-        description = commit_data.get("description", "").strip()
-        body = commit_data.get("body")
+        scope_ = commit_message.scope
+        description = commit_message.description.strip()
+        body = commit_message.body
 
         if not description: # Ensure description is not empty
             raise GenerationError("Generated commit message has an empty description.")
@@ -380,25 +381,21 @@ def generate_commit_message(
         else:
             header = f"{type_}: {description}"
             
-        commit_message = header
+        commit_message_text = header
         
         # Append body if it exists and is not just whitespace
         if body and body.strip():
-            commit_message += f"\n\n{body.strip()}" # Two newlines before the body
+            commit_message_text += f"\n\n{body.strip()}" # Two newlines before the body
 
         if not header.strip(): # Final check on header which contains description
             raise GenerationError("Generated commit message is empty or lacks a description after formatting.")
 
-        return commit_message
+        return commit_message_text
 
     except torch.cuda.OutOfMemoryError:
         raise GenerationError("GPU out of memory. Try using a smaller model, enabling CPU offloading, or reducing input size.")
     except Exception as e:
         current_completion_snippet = "N/A"
-        if 'completion' in locals():
-            current_completion_snippet = completion[:200]
-        elif 'extracted_json_string' in locals() and extracted_json_string is not None:
-            current_completion_snippet = extracted_json_string[:200]
         
         # Handle specific probability tensor errors that occur during generation
         error_message = str(e).lower()
@@ -413,4 +410,4 @@ def generate_commit_message(
         if isinstance(e, (ModelLoadError, GenerationError, ValueError)):
             raise 
         else: # Wrap unexpected errors in GenerationError for consistent handling upstream
-            raise GenerationError(f"An unexpected error occurred during commit message generation: {type(e).__name__} - {str(e)}. Model output snippet: '{current_completion_snippet}...'")
+            raise GenerationError(f"An unexpected error occurred during commit message generation: {type(e).__name__} - {str(e)}. Model output snippet: '{current_completion_snippet}...')")
