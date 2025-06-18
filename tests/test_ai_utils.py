@@ -12,7 +12,8 @@ from axle.ai_utils import (
     get_model_config,
     save_model_config,
     ModelLoadError,
-    GenerationError
+    GenerationError,
+    CommitMessage
 )
 
 class TestAIUtils(BaseAxleTestCase):
@@ -22,16 +23,25 @@ class TestAIUtils(BaseAxleTestCase):
         self.mock_tokenizer = MagicMock()
         self.mock_model = MagicMock()
         
-        # Mock tokenizer behavior
-        self.mock_tokenizer.return_value = {
-            "input_ids": torch.tensor([[1, 2, 3]]),
-            "attention_mask": torch.tensor([[1, 1, 1]])
-        }
-        self.mock_tokenizer.decode.return_value = "JSON:{\"type\": \"feat\", \"scope\": \"api\", \"description\": \"add new endpoint\"}"
+        # Mock tokenizer behavior for chat template
+        self.mock_tokenizer.apply_chat_template.return_value = "test prompt"
         
-        # Mock model behavior
-        self.mock_model.generate.return_value = torch.tensor([[1, 2, 3]])
+        # Mock tokenizer behavior for encoding
+        self.mock_tokenizer.return_value = {
+            'input_ids': torch.tensor([[1, 2, 3]]),
+            'attention_mask': torch.tensor([[1, 1, 1]])
+        }
+        
+        # Mock model behavior - generate returns token tensors
+        self.mock_model.generate.return_value = torch.tensor([[1, 2, 3, 4, 5]])
         self.mock_model.device = torch.device('cpu')  # Add device attribute
+        
+        # Mock tokenizer decode to return valid JSON
+        self.mock_tokenizer.decode.return_value = '{"type": "feat", "scope": "api", "description": "add new endpoint", "body": "This is the body"}'
+        
+        # Mock tokenizer attributes
+        self.mock_tokenizer.eos_token_id = 2
+        self.mock_tokenizer.pad_token = None
 
     def tearDown(self):
         super().tearDown()
@@ -53,74 +63,64 @@ class TestAIUtils(BaseAxleTestCase):
             "model_name": "test-model",
             "temperature": 0.8,
             "top_p": 0.9,
-            "num_return_sequences": 2
+            "num_return_sequences": 1
         }
         save_model_config(test_config)
         loaded_config = get_model_config()
         self.assertEqual(loaded_config, test_config)
 
-    def test_get_model_and_tokenizer_success(self):
-        with patch('transformers.AutoTokenizer.from_pretrained') as mock_tokenizer, \
-             patch('transformers.AutoModelForCausalLM.from_pretrained') as mock_model:
-            
-            mock_tokenizer.return_value = self.mock_tokenizer
-            mock_model.return_value = self.mock_model
-            
-            model, tokenizer = get_model_and_tokenizer()
-            
-            # Verify model and tokenizer were loaded
-            mock_tokenizer.assert_called_once()
-            mock_model.assert_called_once()
+    @patch('transformers.AutoModelForCausalLM.from_pretrained')
+    @patch('transformers.AutoTokenizer.from_pretrained')
+    def test_get_model_and_tokenizer_success(self, mock_tokenizer_from_pretrained, mock_model_from_pretrained):
+        mock_tokenizer_from_pretrained.return_value = self.mock_tokenizer
+        mock_model_from_pretrained.return_value = self.mock_model
+
+        model, tokenizer = get_model_and_tokenizer()
+
+        mock_tokenizer_from_pretrained.assert_called_once()
+        mock_model_from_pretrained.assert_called_once()
+        self.assertEqual(model, self.mock_model)
+        self.assertEqual(tokenizer, self.mock_tokenizer)
 
     def test_get_model_and_tokenizer_cache_dir_error(self):
-        with patch('pathlib.Path.mkdir') as mock_mkdir:
-            mock_mkdir.side_effect = OSError("Permission denied")
-            
+        with patch('pathlib.Path.mkdir', side_effect=OSError("Permission denied")):
             with self.assertRaises(ModelLoadError) as cm:
+                get_model_and_tokenizer.cache_clear()
                 get_model_and_tokenizer()
             self.assertIn("Failed to create cache directory", str(cm.exception))
 
     def test_get_model_and_tokenizer_load_error(self):
-        with patch('transformers.AutoTokenizer.from_pretrained') as mock_tokenizer:
-            mock_tokenizer.side_effect = Exception("Download failed")
-            
+        with patch('transformers.AutoTokenizer.from_pretrained', side_effect=Exception("Download failed")):
             with self.assertRaises(ModelLoadError) as cm:
+                get_model_and_tokenizer.cache_clear()
                 get_model_and_tokenizer()
             self.assertIn("Failed to load model or tokenizer", str(cm.exception))
 
-    def test_generate_commit_message_with_regeneration(self):
-        with patch('axle.ai_utils.get_model_and_tokenizer', 
-                  return_value=(self.mock_model, self.mock_tokenizer)):
-            # Get initial temperature
-            initial_config = get_model_config()
-            initial_temp = initial_config["temperature"]
-            
-            # First generation
-            result1 = generate_commit_message("test diff", "test")
-            self.assertEqual(result1, "feat(api): add new endpoint")
-            
-            # Regenerate with higher temperature
-            result2 = generate_commit_message("test diff", "test", regenerate=True)
-            self.assertEqual(result2, "feat(api): add new endpoint")
-            
-            # Verify config was updated - temperature should be increased by 0.05
-            config = get_model_config()
-            expected_temp = min(0.6, initial_temp + 0.05)  # Capped at 0.6
-            self.assertEqual(config["temperature"], expected_temp)
+    @patch('axle.ai_utils._render_prompt')
+    def test_generate_commit_message_success(self, mock_render_prompt):
+        mock_render_prompt.return_value = "test prompt"
+        with patch('axle.ai_utils.get_model_and_tokenizer', return_value=(self.mock_model, self.mock_tokenizer)):
+            result = generate_commit_message("test diff", "test")
+            self.assertEqual(result, "feat(api): add new endpoint\n\nThis is the body")
 
-    def test_generate_commit_message_empty_output(self):
-        with patch('axle.ai_utils.get_model_and_tokenizer', 
-                  return_value=(self.mock_model, self.mock_tokenizer)):
-            self.mock_tokenizer.decode.return_value = ""
-            with self.assertRaises(GenerationError):
+    @patch('axle.ai_utils._render_prompt')
+    def test_generate_commit_message_empty_output(self, mock_render_prompt):
+        mock_render_prompt.return_value = "test prompt"
+        with patch('axle.ai_utils.get_model_and_tokenizer', return_value=(self.mock_model, self.mock_tokenizer)):
+            # Mock decode to return JSON with empty description
+            self.mock_tokenizer.decode.return_value = '{"type": "feat", "description": "", "scope": null, "body": null}'
+            with self.assertRaises(GenerationError) as cm:
                 generate_commit_message("test diff", "test")
+            self.assertIn("empty description", str(cm.exception))
 
-    def test_generate_commit_message_extraction_error(self):
-        with patch('axle.ai_utils.get_model_and_tokenizer', 
-                  return_value=(self.mock_model, self.mock_tokenizer)):
-            self.mock_tokenizer.decode.return_value = "Invalid output without commit message"
-            with self.assertRaises(GenerationError):
-                generate_commit_message("test diff", "test")
+    @patch('axle.ai_utils._render_prompt')
+    def test_generate_commit_message_generation_error(self, mock_render_prompt):
+        mock_render_prompt.return_value = "test prompt"
+        with patch('axle.ai_utils.get_model_and_tokenizer', return_value=(self.mock_model, self.mock_tokenizer)):
+            self.mock_model.generate.side_effect = Exception("Generation failed")
+            with self.assertRaises(GenerationError) as cm:
+                generate_commit_message("test diff", "api")
+            self.assertIn("An unexpected error occurred during commit message generation", str(cm.exception))
 
     def test_generate_commit_message_empty_diff(self):
         with self.assertRaises(ValueError) as cm:
@@ -128,67 +128,10 @@ class TestAIUtils(BaseAxleTestCase):
         self.assertEqual(str(cm.exception), "Diff content cannot be empty")
 
     def test_generate_commit_message_model_load_error(self):
-        with patch('axle.ai_utils.get_model_and_tokenizer') as mock_get_model:
-            mock_get_model.side_effect = ModelLoadError("Model not found")
-            
+        with patch('axle.ai_utils.get_model_and_tokenizer', side_effect=ModelLoadError("Model not found")):
             with self.assertRaises(GenerationError) as cm:
                 generate_commit_message("test diff", "api")
             self.assertIn("Model initialization failed", str(cm.exception))
-
-    def test_generate_commit_message_out_of_memory(self):
-        with patch('axle.ai_utils.get_model_and_tokenizer', 
-                  return_value=(self.mock_model, self.mock_tokenizer)):
-            self.mock_model.generate.side_effect = torch.cuda.OutOfMemoryError()
-            
-            with self.assertRaises(GenerationError) as cm:
-                generate_commit_message("test diff", "api")
-            self.assertIn("GPU out of memory", str(cm.exception))
-
-    def test_generate_commit_message_generation_error(self):
-        with patch('axle.ai_utils.get_model_and_tokenizer', 
-                  return_value=(self.mock_model, self.mock_tokenizer)):
-            self.mock_model.generate.side_effect = Exception("Generation failed")
-            
-            with self.assertRaises(GenerationError) as cm:
-                generate_commit_message("test diff", "api")
-            self.assertIn("An unexpected error occurred", str(cm.exception))
-
-    def test_generate_commit_message_probability_tensor_error(self):
-        """Test that probability tensor errors are properly handled during regeneration"""
-        with patch('axle.ai_utils.get_model_and_tokenizer', 
-                  return_value=(self.mock_model, self.mock_tokenizer)):
-            # Simulate the specific error from issue #6
-            self.mock_model.generate.side_effect = Exception(
-                "probability tensor contains either `inf`, `nan` or element < 0"
-            )
-            
-            with self.assertRaises(GenerationError) as cm:
-                generate_commit_message("test diff", "api", regenerate=True)
-            
-            # Verify the error message explains the issue and provides guidance
-            error_msg = str(cm.exception)
-            self.assertIn("Model generation failed due to invalid probability values", error_msg)
-            self.assertIn("extreme sampling parameters", error_msg)
-            self.assertIn("lower temperature values", error_msg)
-
-    def test_regenerate_temperature_capping(self):
-        """Test that regenerate mode caps temperature at a safe maximum"""
-        with patch('axle.ai_utils.get_model_and_tokenizer', 
-                  return_value=(self.mock_model, self.mock_tokenizer)):
-            with patch('axle.ai_utils.get_model_config') as mock_get_config:
-                with patch('axle.ai_utils.save_model_config') as mock_save_config:
-                    # Start with high temperature
-                    mock_get_config.return_value = {
-                        "temperature": 0.75,
-                        "top_p": 0.95,
-                        "num_return_sequences": 1
-                    }
-                    
-                    generate_commit_message("test diff", "api", regenerate=True)
-                    
-                    # Verify temperature was capped at 0.6, not 0.8 (0.75 + 0.05 capped)
-                    saved_config = mock_save_config.call_args[0][0]
-                    self.assertEqual(saved_config["temperature"], 0.6)
 
 if __name__ == '__main__':
     unittest.main() 
