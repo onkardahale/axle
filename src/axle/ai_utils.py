@@ -1,6 +1,6 @@
 import os
 from typing import Optional, Tuple, List
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import torch
 from transformers.utils import logging
 import json
@@ -52,7 +52,8 @@ def get_model_config() -> dict:
         "model_name": "Qwen/Qwen2.5-Coder-3B-Instruct",
         "temperature": 0.2,
         "top_p": 0.95,
-        "num_return_sequences": 1
+        "num_return_sequences": 1,
+        "quantization": "8bit"
     }
     
     if config_path.exists():
@@ -88,8 +89,25 @@ def get_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     model_name = config["model_name"]
     cache_dir_models = get_cache_dir() / "models"
     
+    # Configure quantization
+    quantization_type = config.get("quantization", "none")
+    quantization_config = None
+    
+    if quantization_type == "8bit":
+        quantization_config = BitsAndBytesConfig(
+            load_in_8bit=True,
+            llm_int8_threshold=6.0,
+            llm_int8_has_fp16_weight=False,
+        )
+    elif quantization_type == "4bit":
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+        )
+    
     try:
-        
         tokenizer = AutoTokenizer.from_pretrained(
             model_name,
             cache_dir=str(cache_dir_models), # cache_dir expects a string
@@ -102,9 +120,11 @@ def get_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
             cache_dir=str(cache_dir_models), # cache_dir expects a string
             trust_remote_code=True,
             local_files_only=False,
-            torch_dtype=torch.float16,
-            device_map="auto"
+            quantization_config=quantization_config,
+            device_map="auto",
+            torch_dtype=torch.float16 if quantization_config is None else None,
         )
+        
         # Set padding token if not set, common for generation
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
