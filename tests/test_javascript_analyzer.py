@@ -4,18 +4,23 @@ import unittest
 from pathlib import Path
 from tree_sitter import Parser as TreeSitterParser
 import logging
+import shutil
 logger = logging.getLogger(__name__)
+from tests import BaseAxleTestCase
 from src.axle.treesitter.analyzers.javascript_analyzer import JavaScriptAnalyzer
 from src.axle.treesitter.models import FileAnalysis, Import, Class, Function, Variable, FailedAnalysis
 
-class TestJavaScriptAnalyzer(unittest.TestCase):
+class TestJavaScriptAnalyzer(BaseAxleTestCase):
     """Test cases for JavaScript analyzer."""
 
     def setUp(self):
         """Set up test environment."""
+        super().setUp()
         self.analyzer = JavaScriptAnalyzer()
         self.test_dir = Path(__file__).parent / "test_data"
         self.test_dir.mkdir(exist_ok=True)
+        # Register for cleanup
+        self.register_test_data_dir(self.test_dir)
 
     def create_test_file(self, content: str) -> Path:
         """Create a temporary test file with the given content."""

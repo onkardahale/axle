@@ -4,6 +4,7 @@ import os
 import torch
 import json
 from pathlib import Path
+from tests import BaseAxleTestCase
 from axle.ai_utils import (
     get_model_and_tokenizer,
     generate_commit_message,
@@ -14,8 +15,10 @@ from axle.ai_utils import (
     GenerationError
 )
 
-class TestAIUtils(unittest.TestCase):
+class TestAIUtils(BaseAxleTestCase):
     def setUp(self):
+        super().setUp()
+        
         self.mock_tokenizer = MagicMock()
         self.mock_model = MagicMock()
         
@@ -29,6 +32,9 @@ class TestAIUtils(unittest.TestCase):
         # Mock model behavior
         self.mock_model.generate.return_value = torch.tensor([[1, 2, 3]])
         self.mock_model.device = torch.device('cpu')  # Add device attribute
+
+    def tearDown(self):
+        super().tearDown()
 
     def test_get_cache_dir(self):
         cache_dir = get_cache_dir()
