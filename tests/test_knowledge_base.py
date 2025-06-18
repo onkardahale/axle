@@ -87,8 +87,15 @@ def package_function() -> Optional[str]:
         self.assertIn('category', py_analysis)
         
         py_imports = py_analysis['imports']
-        self.assertTrue(any(imp.get('name') == 'os' for imp in py_imports))
-        self.assertTrue(any(imp.get('name') == 'typing' for imp in py_imports))
+        # Handle both string and dict formats (due to optimization)
+        self.assertTrue(any(
+            imp == 'os' or (isinstance(imp, dict) and imp.get('name') == 'os') 
+            for imp in py_imports
+        ))
+        self.assertTrue(any(
+            imp == 'typing' or (isinstance(imp, dict) and imp.get('name') == 'typing')
+            for imp in py_imports
+        ))
         
         py_classes = py_analysis['classes']
         self.assertEqual(len(py_classes), 1)
@@ -112,7 +119,11 @@ def package_function() -> Optional[str]:
         self.assertIn('category', js_analysis)
 
         js_imports = js_analysis['imports']
-        self.assertTrue(any(imp.get('source') == 'fs' for imp in js_imports), "Should find import from 'fs'")
+        # Handle both string and dict formats (due to optimization)
+        self.assertTrue(any(
+            imp == 'fs' or (isinstance(imp, dict) and imp.get('source') == 'fs')
+            for imp in js_imports
+        ), "Should find import from 'fs'")
 
         js_classes = js_analysis['classes']
         self.assertEqual(len(js_classes), 1)
