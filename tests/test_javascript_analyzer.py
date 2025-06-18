@@ -247,5 +247,72 @@ class TestJavaScriptAnalyzer(BaseAxleTestCase):
         self.assertEqual(len(result.functions), 1)
         self.assertEqual(result.functions[0].name, "broken")
 
+    def test_jsdoc_comments(self):
+        """Test JSDoc comment extraction."""
+        content = """
+        /**
+         * Calculates the sum of two numbers.
+         * @param {number} a - The first number
+         * @param {number} b - The second number
+         * @returns {number} The sum of a and b
+         */
+        function add(a, b) {
+            return a + b;
+        }
+
+        /**
+         * Represents a user in the system.
+         * @class
+         */
+        class User {
+            /**
+             * Creates a new User instance.
+             * @param {string} name - The user's name
+             */
+            constructor(name) {
+                this.name = name;
+            }
+        }
+
+        // Regular comment, not JSDoc
+        function noDoc() {
+            return true;
+        }
+        """
+        test_file = self.create_test_file(content)
+        result = self.analyzer.analyze_file(test_file)
+        
+        self.assertIsInstance(result, FileAnalysis)
+        
+        # Check function with JSDoc
+        self.assertIsNotNone(result.functions)
+        add_func = next((f for f in result.functions if f.name == "add"), None)
+        self.assertIsNotNone(add_func)
+        self.assertIsNotNone(add_func.docstring)
+        self.assertIn("Calculates the sum of two numbers", add_func.docstring)
+        self.assertIn("@param {number} a", add_func.docstring)
+        self.assertIn("@returns {number}", add_func.docstring)
+        
+        # Check function without JSDoc
+        no_doc_func = next((f for f in result.functions if f.name == "noDoc"), None)
+        self.assertIsNotNone(no_doc_func)
+        self.assertIsNone(no_doc_func.docstring)
+        
+        # Check class with JSDoc
+        self.assertIsNotNone(result.classes)
+        user_class = next((c for c in result.classes if c.name == "User"), None)
+        self.assertIsNotNone(user_class)
+        self.assertIsNotNone(user_class.docstring)
+        self.assertIn("Represents a user in the system", user_class.docstring)
+        self.assertIn("@class", user_class.docstring)
+        
+        # Check method with JSDoc
+        self.assertIsNotNone(user_class.methods)
+        constructor = next((m for m in user_class.methods if m.name == "constructor"), None)
+        self.assertIsNotNone(constructor)
+        self.assertIsNotNone(constructor.docstring)
+        self.assertIn("Creates a new User instance", constructor.docstring)
+        self.assertIn("@param {string} name", constructor.docstring)
+
 if __name__ == '__main__':
     unittest.main() 
