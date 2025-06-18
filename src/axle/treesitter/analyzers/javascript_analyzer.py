@@ -39,10 +39,81 @@ class JavaScriptAnalyzer(BaseAnalyzer):
         return s
 
     def _get_jsdoc_comment(self, node: Node, source_code: bytes) -> Optional[str]:
-        """Extract JSDoc comment from a node if present."""
-        # TODO: Implement JSDoc comment extraction
-        # This would involve looking at node.prev_named_sibling or similar
-        # and checking if it's a comment node matching JSDoc pattern.
+        """Extract JSDoc comment from a node if present.
+        
+        JSDoc comments are block comments that start with /** and are typically
+        placed immediately before the declaration they document.
+        
+        Args:
+            node: The AST node to find JSDoc comment for
+            source_code: The source code bytes
+            
+        Returns:
+            The JSDoc comment text without the /** */ delimiters, or None if not found
+        """
+        # Look for comments before the current node
+        current = node
+        
+        # First, try to find the previous sibling that might be a comment
+        prev_sibling = current.prev_sibling
+        
+        # Sometimes comments are not direct siblings, so we need to look more broadly
+        # We'll search backwards through siblings and also check the parent's previous siblings
+        comment_candidates = []
+        
+        # Collect potential comment nodes by walking backwards
+        while prev_sibling:
+            if prev_sibling.type == "comment":
+                comment_candidates.append(prev_sibling)
+                # Only take the immediately preceding comment to avoid cross-contamination
+                break
+            elif prev_sibling.type in ("identifier", "}", ";", ")", "export", "async", "class_declaration", "function_declaration", "method_definition"):
+                # These are likely part of other declarations, stop searching
+                break
+            prev_sibling = prev_sibling.prev_sibling
+        
+        # If no direct siblings found, try parent's previous siblings (for nested declarations like methods)
+        if not comment_candidates and current.parent:
+            parent_prev = current.parent.prev_sibling
+            while parent_prev:
+                if parent_prev.type == "comment":
+                    comment_candidates.append(parent_prev)
+                    # Only take the immediately preceding comment
+                    break
+                elif parent_prev.type in ("class_declaration", "function_declaration", "method_definition"):
+                    # Stop if we hit another declaration
+                    break
+                parent_prev = parent_prev.prev_sibling
+        
+        # Process comment candidates to find JSDoc
+        for comment_node in comment_candidates:
+            comment_text = self._get_node_text(comment_node, source_code)
+            
+            # Check if it's a JSDoc comment (starts with /** and ends with */)
+            if comment_text.startswith("/**") and comment_text.endswith("*/"):
+                # Extract the content, removing the /** */ delimiters
+                content = comment_text[3:-2].strip()
+                
+                # Clean up the content by removing leading * from each line
+                lines = content.split('\n')
+                cleaned_lines = []
+                
+                for line in lines:
+                    line = line.strip()
+                    # Remove leading * and whitespace
+                    if line.startswith('*'):
+                        line = line[1:].strip()
+                    elif line.startswith('* '):
+                        line = line[2:]
+                    cleaned_lines.append(line)
+                
+                # Join lines and clean up extra whitespace
+                result = '\n'.join(cleaned_lines).strip()
+                
+                # Only return non-empty comments
+                if result:
+                    return result
+        
         return None
 
     def _get_identifier_text_from_lhs_expression(self, lhs_node: Node, source_code: bytes) -> Optional[str]:
@@ -393,20 +464,20 @@ class JavaScriptAnalyzer(BaseAnalyzer):
                 parameters_node_to_process = params_field_node
                 logger.debug(
                     f"  Successfully found 'formal_parameters' node (type: {params_field_node.type}) "
-                    f"via field 'parameters' for '{func_name}'. Node SEXP: {parameters_node_to_process.sexp()}"
+                    f"via field 'parameters' for '{func_name}'. Node structure: {str(parameters_node_to_process)}"
                 )
             else:
                 # This case would be unexpected if the grammar is consistently applied.
                 logger.warning(
                     f"  Node found by field 'parameters' for function '{func_name}' is of type "
                     f"'{params_field_node.type}', NOT 'formal_parameters' as expected from inlined _call_signature. "
-                    f"Node SEXP: {params_field_node.sexp()}. Parameters might not be processed correctly."
+                    f"Node structure: {str(params_field_node)}. Parameters might not be processed correctly."
                 )
                 # parameters_node_to_process remains None or handle as an error
         else:
             logger.warning(
                 f"  Could not find 'formal_parameters' node using field 'parameters' for function '{func_name}'. "
-                f"Function node SEXP: {node.sexp()}. This suggests an issue with accessing the inlined field "
+                f"Function node structure: {str(node)}. This suggests an issue with accessing the inlined field "
                 f"or an unexpected tree structure for this function_declaration."
             )
 
