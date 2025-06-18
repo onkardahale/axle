@@ -2,6 +2,18 @@
 
 Axle is a command-line tool that helps you write better commit messages using AI. It analyzes your code changes and suggests a commit message in a structured format.
 
+## Table of Contents
+
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Knowledge Base](#knowledge-base)
+- [Language Support](#language-support)
+- [Interactive Features](#interactive-features)
+- [Configuration](#configuration)
+- [Contributing](#contributing)
+
 ## Features
 
 - 🤖 AI-powered commit message generation using the Qwen2.5-Coder-3B-Instruct model
@@ -14,6 +26,20 @@ Axle is a command-line tool that helps you write better commit messages using AI
 - 🌳 Tree-sitter based code parsing for better context understanding
 - 🌐 Multi-language support through tree-sitter grammars
 
+## Quick Start
+
+```bash
+# Install
+pip install git+https://github.com/onkardahale/axle.git
+
+# Initialize knowledge base (optional but recommended)
+axle init
+
+# Stage your changes and generate commit message
+git add .
+axle commit
+```
+
 ## Installation
 
 ```bash
@@ -22,22 +48,22 @@ pip install git+https://github.com/onkardahale/axle.git
 
 ## Usage
 
-1. Initialize the knowledge base (recommended for better commit messages):
+1. **Initialize the knowledge base** (recommended for better commit messages):
 ```bash
 axle init
 ```
 
-2. Stage your changes:
+2. **Stage your changes:**
 ```bash
 git add .
 ```
 
-3. Generate a commit message:
+3. **Generate a commit message:**
 ```bash
 axle commit
 ```
 
-4. The tool will:
+4. **The tool will:**
    - Analyze your staged changes
    - Use the knowledge base for context (if available)
    - Generate a commit message
@@ -55,25 +81,10 @@ The `axle init` command creates a local knowledge base in the `.axle` directory 
 - Provides rich context for commit message generation
 - Supports multiple programming languages through tree-sitter grammars
 - Automatically detects and processes supported file types
-- Maintains a detailed log of analyzed and skipped files
-
-The knowledge base is automatically used when generating commit messages, leading to more accurate and contextually relevant messages.
 
 ### Ignoring Files and Directories
 
-You can control which files and directories are ignored during knowledge base building by creating a `.axleignore` file in your project root. This works similarly to `.gitignore` but specifically for the knowledge base build process.
-
-#### .axleignore Syntax
-
-The `.axleignore` file supports the following patterns:
-
-- **Directory patterns**: End with `/` to match directories (e.g., `build/`, `dist/`)
-- **File patterns**: Use wildcards to match files (e.g., `*.log`, `*.tmp`)
-- **Wildcard patterns**: Use `*` for any characters (e.g., `temp*`, `*cache*`)
-- **Comments**: Lines starting with `#` are ignored
-- **Exact matches**: Specify exact file or directory names
-
-#### Example .axleignore file:
+Create a `.axleignore` file in your project root to control which files are analyzed:
 
 ```
 # Build directories
@@ -93,126 +104,53 @@ temp*
 # Documentation
 docs/
 *.md
-
-# Configuration files
-*.json
-*.yaml
-*.yml
 ```
 
-By default, the following directories are always ignored: `.git`, `.hg`, `.svn`, `.vscode`, `node_modules`, `__pycache__`, and `.axle`.
+**Default ignored directories:** `.git`, `.hg`, `.svn`, `.vscode`, `node_modules`, `__pycache__`, `.axle`
 
-### Language Support
+## Language Support
 
-Axle is designed to be language-agnostic through its use of tree-sitter. Currently, we have dedicated analyzers for:
+Axle supports multiple programming languages through dedicated analyzers:
 
-- Python (`.py`)
-- JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`)
+### **Currently Supported:**
+- **Python** (`.py`)
+- **JavaScript** (`.js`, `.jsx`, `.mjs`, `.cjs`)
+- **C/C++** (`.c`, `.cpp`, `.cc`, `.cxx`, `.h`, `.hpp`, `.hxx`) ✨ *New!*
 
-While the project uses `tree-sitter-language-pack` which provides grammar support for many languages, we need community contributions to add analyzers for additional languages. Languages that could be supported (but need analyzer implementation) include:
-
+### **Planned Languages:**
 - TypeScript (`.ts`, `.tsx`)
 - Java (`.java`)
 - Go (`.go`)
 - Rust (`.rs`)
-- C/C++ (`.c`, `.cpp`, `.h`, `.hpp`)
 - Ruby (`.rb`)
 - PHP (`.php`)
-- And many more through tree-sitter grammars
 
-The knowledge base automatically:
-- Detects file types based on extensions
-- Uses appropriate language-specific analyzers
-- Extracts language-specific constructs (classes, functions, imports, etc.)
-- Categorizes files based on their content and structure
-- Handles language-specific syntax and patterns
-
-### Contributing Language Analyzers
-
-We welcome contributions to add support for more languages! To add a new language analyzer:
-
-1. Create a new analyzer class in `src/axle/treesitter/analyzers/` following the pattern of existing analyzers
-2. Implement the required methods:
-   - `analyze_file()`: Main analysis method
-   - `_process_imports()`: Handle language-specific import statements
-   - `_process_classes()`: Extract class definitions and methods
-   - `_process_functions()`: Extract function definitions
-   - `_process_variables()`: Extract variable declarations
-
-3. Add the analyzer to the `TreeSitterParser` class in `src/axle/treesitter/parser.py`
-4. Add tests in `tests/test_<language>_analyzer.py`
-5. Update documentation
-
-Example structure for a new analyzer:
-```python
-from .base import BaseAnalyzer
-
-class NewLanguageAnalyzer(BaseAnalyzer):
-    """Analyzer for NewLanguage."""
-    
-    def __init__(self):
-        super().__init__("new_language")
-        self.extension_map = {
-            ".ext1": "new_language",
-            ".ext2": "new_language"
-        }
-    
-    def analyze_file(self, file_path: Path) -> FileAnalysis:
-        # Implementation
-        pass
-    
-    def _process_imports(self, tree: Tree) -> List[Import]:
-        # Implementation
-        pass
-    
-    # ... other required methods
-```
-
-Check out our existing analyzers for reference:
-- `javascript_analyzer.py`: JavaScript/JSX support
-- `python_analyzer.py`: Python support
+> **Note:** While tree-sitter-language-pack provides grammar support for many languages, each requires a dedicated analyzer implementation. [Contributions welcome!](#contributing-language-analyzers)
 
 ### File Categorization
 
-The knowledge base categorizes files based on their imports and path patterns. Here are the currently implemented categories:
+Files are automatically categorized based on:
 
-#### Import-based Categories
-Files are categorized based on their imported libraries and frameworks:
+**Import-based categories:**
+- `web_framework`: Django, Flask, React, Vue, etc.
+- `test`: pytest, jest, mocha, etc.
+- `database`: SQLAlchemy, mongoose, etc.
+- `data_processing`: pandas, numpy
+- `ml`: tensorflow, pytorch, sklearn
 
-- `web_framework`: Files importing web frameworks
-  - Python: Django, Flask
-  - JavaScript: React, Angular, Vue, Express
+**Path-based categories:**
+- `util`, `test`, `config`, `model`, `controller`, `service`, `ui_component`, `entrypoint`
 
-- `test`: Files importing testing frameworks
-  - Python: pytest, unittest
-  - JavaScript: jest, mocha
+### Contributing Language Analyzers
 
-- `database`: Files importing database libraries
-  - Python: SQLAlchemy
-  - JavaScript: mongoose, sequelize
+To add support for a new language:
 
-- `data_processing`: Files importing data processing libraries
-  - Python: pandas, numpy
+1. **Create analyzer** in `src/axle/treesitter/analyzers/`
+2. **Implement required methods** following existing patterns
+3. **Add tests** in `tests/test_<language>_analyzer.py`
+4. **Update documentation**
 
-- `ml`: Files importing machine learning libraries
-  - Python: tensorflow, torch, sklearn
-
-#### Path-based Categories
-Files are categorized based on their path and filename patterns:
-
-- `util`: Files in paths containing 'util', 'helper', or 'lib'
-- `test`: Files in paths containing 'test' or 'spec'
-- `config`: Files in paths containing 'config', 'conf', or 'setup'
-- `model`: Files in paths containing 'model' or 'schema'
-- `controller`: Files in paths containing 'controller', 'handler', 'router', or 'route'
-- `service`: Files in paths containing 'service'
-- `ui_component`: Files in paths containing 'component' or 'view'
-- `package_init`: Files named `__init__.py`
-- `entrypoint`: Files named:
-  - Python: `main.py`, `cli.py`
-  - JavaScript: `main.js`, `index.js`, `app.js`, `server.js`, `cli.js`
-
-Files that don't match any of these patterns are categorized as `unknown`.
+See `javascript_analyzer.py` and `cpp_analyzer.py` for reference implementations.
 
 ## Interactive Features
 
@@ -227,59 +165,9 @@ You'll also be prompted to:
 - Link related issues (e.g., "Fixes #123")
 - Declare breaking changes with descriptions
 
-## Project History
-
-This project was developed using Axle itself! 
-Here are some of the commit messages that were generated by Axle during development:
-
-```
-d9d5b693cc225285bc6fc1c81a83b5949b533103
-feat(tests): Add setup and teardown methods to BaseAxleTestCase for cleaner test environments
-
-Added `setUp` and `tearDown` methods to `BaseAxleTestCase` to handle common setup and teardown tasks for tests. This includes creating temporary directories for backups and test data, backing up original configuration files, and cleaning up resources after tests.
-
-Fixes: #8
-```
-
-```
-3d127ea97ea7195c38a6e887b851b157ae45e8a7
-refactor(ai_utils): improve robustness and error handling in commit message generation
-
-Added checks to validate and clamp generation parameters to prevent tensor issues:
-- Ensured temperature is within [0.01, 0.6]
-- Clamped top_p to [0.01, 0.95]
-- Set num_return_sequences to 1 to avoid excessive output
-- Checked for NaN or infinite values in generated probabilities
-
-Updated error handling to handle specific probability tensor errors during regeneration:
-- Wrapped unexpected errors in GenerationError for consistent handling upstream
-- Provided guidance on how to resolve probability tensor issues
-
-Fixes: #6
-```
-
-```
-c5107b574b8b28314b15ebdcbcfaadf24534a68e
-chore(.gitignore): Add new entries to .gitignore file
-
-Added entries for various Python, virtual environment, IDE, project-specific, testing, distribution/packaging, logs and databases files.
-```
-
-```
-ca0e81ef60ca52f40fa6345bcdf74deefc6020e7
-feat(tests): Add new test files for AI utils
-```
-
-```
-2535d745da45049509b4690217fd494a0c2da32d
-feat(axle): Add initial implementation of axle CLI tool
-```
-
-Each commit message was automatically generated by Axle based on the actual changes made to the codebase.
-
 ## Configuration
 
-The tool uses a configuration file at `~/.cache/axle/model_config.json` with the following structure:
+Customize generation behavior via `~/.cache/axle/model_config.json`:
 
 ```json
 {
@@ -290,46 +178,68 @@ The tool uses a configuration file at `~/.cache/axle/model_config.json` with the
 }
 ```
 
-You can modify these parameters to adjust the generation behavior.
-
 ## Commit Message Format
 
-Commit messages are generated in JSON format with the following structure:
+Generated commits follow conventional commit format:
 
-```json
-{
-    "type": "feat|fix|docs|style|refactor|test|chore",
-    "scope": "optional-scope",
-    "description": "concise description of changes"
-}
+```
+type(scope): description
+
+[optional body]
+
+[optional footer]
 ```
 
-The final commit message will include:
-- Type and scope (if any)
-- Description
-- Issue references (if provided)
-- Breaking change description (if declared)
+**Types:** `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`
 
 ## Requirements
 
-- Python 3.9+
-- Git
-- A text editor (vim, nano, etc.)
+- **Python 3.12+**
+- **Git**
+- **Text editor** (vim, nano, etc.)
 
 ## Dependencies
 
-- click
-- transformers
-- torch
-- accelerate
-- tree-sitter (>=0.20.3,<0.23.0)
-- tree-sitter-language-pack
+- click, transformers, torch, accelerate
+- tree-sitter, tree-sitter-language-pack
 - pydantic (>=2.0.0)
 
-## License
+## Project History
 
-MIT
+This project was developed using Axle itself! Here are some example generated commit messages:
+
+```
+feat(tests): Add setup and teardown methods to BaseAxleTestCase for cleaner test environments
+
+Added `setUp` and `tearDown` methods to `BaseAxleTestCase` to handle common setup 
+and teardown tasks for tests. This includes creating temporary directories for 
+backups and test data, backing up original configuration files, and cleaning up 
+resources after tests.
+
+Fixes: #8
+```
+
+```
+refactor(ai_utils): improve robustness and error handling in commit message generation
+
+Added checks to validate and clamp generation parameters to prevent tensor issues:
+- Ensured temperature is within [0.01, 0.6]
+- Clamped top_p to [0.01, 0.95]
+- Set num_return_sequences to 1 to avoid excessive output
+
+Fixes: #6
+```
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request. 
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+**Areas where we need help:**
+- New language analyzers
+- Improved file categorization
+- Documentation improvements
+- Bug reports and fixes
+
+## License
+
+MIT 
