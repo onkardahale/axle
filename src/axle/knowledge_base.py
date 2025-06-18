@@ -8,8 +8,9 @@ that stores information about the project's codebase structure.
 import json
 import os
 import logging
+import fnmatch
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 
 from .treesitter import TreeSitterParser
 from .treesitter.exceptions import TreeSitterError
@@ -34,8 +35,73 @@ class KnowledgeBase:
         self.project_root = project_root
         self.kb_dir = project_root / '.axle'
         self.kb_dir.mkdir(exist_ok=True)
-        self.parser = TreeSitterParser() 
+        self.parser = TreeSitterParser()
+        self.ignore_patterns = self._load_ignore_patterns()
         
+    def _load_ignore_patterns(self) -> List[str]:
+        """Load ignore patterns from .axleignore file.
+        
+        Returns:
+            List of ignore patterns
+        """
+        ignore_file = self.project_root / '.axleignore'
+        patterns = []
+        
+        if ignore_file.exists():
+            try:
+                with open(ignore_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        # Skip empty lines and comments
+                        if line and not line.startswith('#'):
+                            patterns.append(line)
+            except IOError as e:
+                logger.warning(f"Failed to read .axleignore file: {e}")
+        
+        return patterns
+    
+    def _should_ignore_path(self, path: Path) -> bool:
+        """Check if a path should be ignored based on .axleignore patterns.
+        
+        Args:
+            path: Path to check (can be file or directory)
+            
+        Returns:
+            True if the path should be ignored, False otherwise
+        """
+        try:
+            relative_path = path.relative_to(self.project_root)
+        except ValueError:
+            # Path is not relative to project root, ignore it
+            return True
+            
+        path_str = str(relative_path)
+        path_parts = relative_path.parts
+        
+        for pattern in self.ignore_patterns:
+            # Check if pattern matches the full path
+            if fnmatch.fnmatch(path_str, pattern):
+                return True
+            
+            # Check if pattern matches any part of the path (for directory patterns)
+            if pattern.endswith('/'):
+                # Directory pattern - check if any parent directory matches
+                dir_pattern = pattern.rstrip('/')
+                for part in path_parts:
+                    if fnmatch.fnmatch(part, dir_pattern):
+                        return True
+            else:
+                # Check if any parent directory matches the pattern
+                for part in path_parts:
+                    if fnmatch.fnmatch(part, pattern):
+                        return True
+                        
+                # Check if filename matches the pattern
+                if fnmatch.fnmatch(path.name, pattern):
+                    return True
+        
+        return False
+    
     def analyze_file(self, file_path: Path) -> Optional[Dict[str, Any]]:
         """Analyze a source file and extract structural information.
         
@@ -172,12 +238,25 @@ class KnowledgeBase:
             logger.warning("No supported file extensions found in TreeSitterParser. Knowledge base might be empty.")
 
         common_non_source_extensions = ('.pyc', '.pyo', '.pyd', '.so', '.dll', '.exe', '.json', '.md', '.txt', '.log', '.gz', '.zip', '.tar') 
+        
+        # Default directories to always ignore
+        default_ignore_dirs = {'.git', '.hg', '.svn', '.vscode', 'node_modules', '__pycache__', '.axle'}
 
         for root, dirs, files in os.walk(self.project_root):
-            dirs[:] = [d for d in dirs if d not in ['.git', '.hg', '.svn', '.vscode', 'node_modules', '__pycache__', '.axle']]
+            # Filter out default ignore directories
+            dirs[:] = [d for d in dirs if d not in default_ignore_dirs]
+            
+            # Filter out directories based on .axleignore patterns
+            root_path = Path(root)
+            dirs[:] = [d for d in dirs if not self._should_ignore_path(root_path / d)]
 
             for file_name in files:
                 file_path = Path(root) / file_name
+                
+                # Skip files that match .axleignore patterns
+                if self._should_ignore_path(file_path):
+                    skipped_files_log.append(f"{str(file_path)} (ignored by .axleignore)")
+                    continue
                 
                 if file_name.lower().endswith(supported_extensions):
                     if '.axle' in file_path.parts:
