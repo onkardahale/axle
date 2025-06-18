@@ -265,10 +265,35 @@ def generate_commit_message(
             inputs = {k: v.to(model.device) for k, v in inputs.items()}
         
         if regenerate:
-            config["temperature"] = min(1.0, config["temperature"] + 0.1) 
-            config["temperature"] = max(0.1, config["temperature"]) 
-            print(f"Regenerating with temperature: {config['temperature']:.2f}") # Feedback for user
+            # Increase temperature for more variation, but cap at a conservative maximum to avoid
+            # probability tensor issues (inf, nan, or negative values)
+            config["temperature"] = min(0.6, config["temperature"] + 0.05)
+            config["temperature"] = max(0.1, config["temperature"])
+            print(f"Regenerating with temperature: {config['temperature']:.2f}")
             save_model_config(config)
+
+        # Validate generation parameters to prevent tensor issues
+        temperature = float(config["temperature"])
+        top_p = float(config["top_p"])
+        num_return_sequences = int(config["num_return_sequences"])
+        
+        # Ensure parameters are within safe ranges
+        if not (0.01 <= temperature <= 0.6):
+            print(f"Warning: Invalid temperature {temperature}, clamping to safe range")
+            temperature = max(0.01, min(0.6, temperature))
+        if not (0.01 <= top_p <= 0.95):
+            print(f"Warning: Invalid top_p {top_p}, clamping to safe range")
+            top_p = max(0.01, min(0.95, top_p))
+        if num_return_sequences < 1:
+            print(f"Warning: Invalid num_return_sequences {num_return_sequences}, setting to 1")
+            num_return_sequences = 1
+            
+        # Check for NaN or infinite values
+        if not (torch.isfinite(torch.tensor(temperature)) and torch.isfinite(torch.tensor(top_p))):
+            raise GenerationError("Invalid generation parameters: temperature or top_p contains NaN or infinite values")
+        
+        # Debug logging for parameter values
+        print(f"Debug: Using parameters - temperature: {temperature}, top_p: {top_p}, num_return_sequences: {num_return_sequences}")
         
         with torch.no_grad():
             start_time = time.perf_counter()  # Start timing
@@ -276,10 +301,10 @@ def generate_commit_message(
                 inputs["input_ids"],
                 max_new_tokens=250, # Increased slightly for potentially complex JSON structures or minor verbosity
                 attention_mask=inputs["attention_mask"],  
-                num_return_sequences=config["num_return_sequences"],
-                temperature=config["temperature"],
+                num_return_sequences=num_return_sequences,
+                temperature=temperature,
                 do_sample=True,
-                top_p=config["top_p"],
+                top_p=top_p,
                 pad_token_id=tokenizer.eos_token_id
             )
             end_time = time.perf_counter()  # End timing
@@ -331,16 +356,17 @@ def generate_commit_message(
         # ---- End of Robust JSON Extraction Logic ----
 
         if extracted_json_string is None:
-            raise GenerationError("Could not extract a clear JSON object from the model's output.")
+            raise GenerationError(f"Could not extract a clear JSON object from the model's output. Raw completion: '{completion[:500]}...'")
         
         try:
             commit_data = json.loads(extracted_json_string)
         except json.JSONDecodeError as e:
-            raise GenerationError(f"Failed to parse JSON from model: {str(e)}")
+            raise GenerationError(f"Failed to parse JSON from model: {str(e)}. Extracted JSON string was: '{extracted_json_string}'")
 
         type_ = commit_data.get("type", "feat")
         if type_ not in ALLOWED_TYPES:
-            type_ = "feat"  # Default to feat if invalid type
+            print(f"Warning: Invalid commit type '{type_}' received from model. Defaulting to 'feat'.")
+            type_ = "feat"
 
         scope_ = commit_data.get("scope")
         description = commit_data.get("description", "").strip()
@@ -360,7 +386,7 @@ def generate_commit_message(
         if body and body.strip():
             commit_message += f"\n\n{body.strip()}" # Two newlines before the body
 
-        if not header.strip() or not description : # Final check
+        if not header.strip(): # Final check on header which contains description
             raise GenerationError("Generated commit message is empty or lacks a description after formatting.")
 
         return commit_message
@@ -368,12 +394,23 @@ def generate_commit_message(
     except torch.cuda.OutOfMemoryError:
         raise GenerationError("GPU out of memory. Try using a smaller model, enabling CPU offloading, or reducing input size.")
     except Exception as e:
-        # Catch any other unexpected errors during generation steps
-        # Add the current completion to the error message if available
-        current_completion = "N/A"
+        current_completion_snippet = "N/A"
         if 'completion' in locals():
-            current_completion = completion
+            current_completion_snippet = completion[:200]
         elif 'extracted_json_string' in locals() and extracted_json_string is not None:
-            current_completion = extracted_json_string
-
-        raise GenerationError(f"Failed to generate commit message: {str(e)}. Model output snippet: '{current_completion[:200]}...'")
+            current_completion_snippet = extracted_json_string[:200]
+        
+        # Handle specific probability tensor errors that occur during generation
+        error_message = str(e).lower()
+        if any(phrase in error_message for phrase in ['probability tensor', 'inf', 'nan', 'element < 0']):
+            raise GenerationError(
+                f"Model generation failed due to invalid probability values. This often occurs with "
+                f"extreme sampling parameters. Try using lower temperature values. "
+                f"Original error: {str(e)}"
+            )
+        
+        # Re-raise original error type if it's ModelLoadError or GenerationError, otherwise wrap
+        if isinstance(e, (ModelLoadError, GenerationError, ValueError)):
+            raise 
+        else: # Wrap unexpected errors in GenerationError for consistent handling upstream
+            raise GenerationError(f"An unexpected error occurred during commit message generation: {type(e).__name__} - {str(e)}. Model output snippet: '{current_completion_snippet}...'")

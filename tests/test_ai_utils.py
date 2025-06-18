@@ -85,6 +85,10 @@ class TestAIUtils(unittest.TestCase):
     def test_generate_commit_message_with_regeneration(self):
         with patch('axle.ai_utils.get_model_and_tokenizer', 
                   return_value=(self.mock_model, self.mock_tokenizer)):
+            # Get initial temperature
+            initial_config = get_model_config()
+            initial_temp = initial_config["temperature"]
+            
             # First generation
             result1 = generate_commit_message("test diff", "test")
             self.assertEqual(result1, "feat(api): add new endpoint")
@@ -93,9 +97,10 @@ class TestAIUtils(unittest.TestCase):
             result2 = generate_commit_message("test diff", "test", regenerate=True)
             self.assertEqual(result2, "feat(api): add new endpoint")
             
-            # Verify config was updated
+            # Verify config was updated - temperature should be increased by 0.05
             config = get_model_config()
-            self.assertGreater(config["temperature"], 0.6)  # Initial temperature
+            expected_temp = min(0.6, initial_temp + 0.05)  # Capped at 0.6
+            self.assertEqual(config["temperature"], expected_temp)
 
     def test_generate_commit_message_empty_output(self):
         with patch('axle.ai_utils.get_model_and_tokenizer', 
@@ -140,7 +145,44 @@ class TestAIUtils(unittest.TestCase):
             
             with self.assertRaises(GenerationError) as cm:
                 generate_commit_message("test diff", "api")
-            self.assertIn("Failed to generate commit message", str(cm.exception))
+            self.assertIn("An unexpected error occurred", str(cm.exception))
+
+    def test_generate_commit_message_probability_tensor_error(self):
+        """Test that probability tensor errors are properly handled during regeneration"""
+        with patch('axle.ai_utils.get_model_and_tokenizer', 
+                  return_value=(self.mock_model, self.mock_tokenizer)):
+            # Simulate the specific error from issue #6
+            self.mock_model.generate.side_effect = Exception(
+                "probability tensor contains either `inf`, `nan` or element < 0"
+            )
+            
+            with self.assertRaises(GenerationError) as cm:
+                generate_commit_message("test diff", "api", regenerate=True)
+            
+            # Verify the error message explains the issue and provides guidance
+            error_msg = str(cm.exception)
+            self.assertIn("Model generation failed due to invalid probability values", error_msg)
+            self.assertIn("extreme sampling parameters", error_msg)
+            self.assertIn("lower temperature values", error_msg)
+
+    def test_regenerate_temperature_capping(self):
+        """Test that regenerate mode caps temperature at a safe maximum"""
+        with patch('axle.ai_utils.get_model_and_tokenizer', 
+                  return_value=(self.mock_model, self.mock_tokenizer)):
+            with patch('axle.ai_utils.get_model_config') as mock_get_config:
+                with patch('axle.ai_utils.save_model_config') as mock_save_config:
+                    # Start with high temperature
+                    mock_get_config.return_value = {
+                        "temperature": 0.75,
+                        "top_p": 0.95,
+                        "num_return_sequences": 1
+                    }
+                    
+                    generate_commit_message("test diff", "api", regenerate=True)
+                    
+                    # Verify temperature was capped at 0.6, not 0.8 (0.75 + 0.05 capped)
+                    saved_config = mock_save_config.call_args[0][0]
+                    self.assertEqual(saved_config["temperature"], 0.6)
 
 if __name__ == '__main__':
     unittest.main() 
