@@ -19,7 +19,8 @@ from ..exceptions import GrammarError, ParsingError
 from .base import BaseAnalyzer
 from .python_analyzer import PythonAnalyzer
 from .javascript_analyzer import JavaScriptAnalyzer
+from .cpp_analyzer import CppAnalyzer
 
-__all__ = ['BaseAnalyzer', 'PythonAnalyzer', 'JavaScriptAnalyzer']
+__all__ = ['BaseAnalyzer', 'PythonAnalyzer', 'JavaScriptAnalyzer', 'CppAnalyzer']
 
 logger = logging.getLogger(__name__)
