@@ -145,6 +145,9 @@ class KnowledgeBase:
             # analysis['imports'] will be a list of dicts due to model_dump
             analysis['category'] = self._determine_file_category(file_path, analysis['imports']) 
            
+            # --- Optimize Analysis for Token Efficiency ---
+            analysis = self._optimize_analysis(analysis)
+           
             return analysis
             
         except TreeSitterError as e: # This catches GrammarError or "Unsupported file type" from self.parser.analyze_file
@@ -228,6 +231,132 @@ class KnowledgeBase:
         if Path(file_path).name in ('main.js', 'index.js', 'app.js', 'server.js', 'cli.js', 'main.py', 'cli.py'): return 'entrypoint'
         return 'unknown'
     
+    def _optimize_analysis(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """Optimize analysis data to reduce token count while preserving information.
+        
+        Args:
+            analysis: Original analysis dictionary
+            
+        Returns:
+            Optimized analysis dictionary
+        """
+        optimized = {}
+        
+        # Always include essential fields
+        optimized['analyzer'] = analysis.get('analyzer', '')
+        optimized['path'] = analysis.get('path', '')
+        
+        # Optimize imports - remove redundant structure
+        if analysis.get('imports'):
+            optimized['imports'] = self._optimize_imports(analysis['imports'])
+        
+        # Optimize classes - remove empty calls arrays and self parameters
+        if analysis.get('classes'):
+            optimized['classes'] = self._optimize_classes(analysis['classes'])
+        
+        # Optimize functions
+        if analysis.get('functions'):
+            optimized['functions'] = self._optimize_functions(analysis['functions'])
+        
+        # Only include variables if they have meaningful content
+        if analysis.get('variables'):
+            opt_vars = self._optimize_variables(analysis['variables'])
+            if opt_vars:
+                optimized['variables'] = opt_vars
+        
+        # Only include category if it's not 'unknown'
+        category = analysis.get('category')
+        if category and category != 'unknown':
+            optimized['category'] = category
+            
+        return optimized
+    
+    def _optimize_imports(self, imports: List[Dict[str, Any]]) -> List[Any]:
+        """Optimize import representations."""
+        optimized = []
+        for imp in imports:
+            # For simple imports where name equals source, just store the name
+            if (imp.get('name') == imp.get('source') and 
+                not imp.get('items')):
+                optimized.append(imp['name'])
+            else:
+                # Keep structured format but remove redundancy
+                opt_imp = {}
+                if imp.get('name'):
+                    opt_imp['name'] = imp['name']
+                if imp.get('source') and imp['source'] != imp.get('name'):
+                    opt_imp['source'] = imp['source']
+                if imp.get('items'):
+                    opt_imp['items'] = imp['items']
+                optimized.append(opt_imp)
+        return optimized
+    
+    def _optimize_classes(self, classes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Optimize class representations."""
+        optimized = []
+        for cls in classes:
+            opt_class = {'name': cls['name']}
+            
+            # Preserve docstring completely
+            if cls.get('docstring'):
+                opt_class['docstring'] = cls['docstring']
+            
+            # Include bases if present
+            if cls.get('bases'):
+                opt_class['bases'] = cls['bases']
+            
+            # Optimize methods
+            if cls.get('methods'):
+                opt_methods = []
+                for method in cls['methods']:
+                    opt_method = self._optimize_method(method)
+                    opt_methods.append(opt_method)
+                opt_class['methods'] = opt_methods
+            
+            optimized.append(opt_class)
+        return optimized
+    
+    def _optimize_functions(self, functions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Optimize function representations."""
+        optimized = []
+        for func in functions:
+            opt_func = self._optimize_method(func)  # Same optimization as methods
+            optimized.append(opt_func)
+        return optimized
+    
+    def _optimize_method(self, method: Dict[str, Any]) -> Dict[str, Any]:
+        """Optimize method/function representation."""
+        opt_method = {'name': method['name']}
+        
+        # Preserve docstring completely
+        if method.get('docstring'):
+            opt_method['docstring'] = method['docstring']
+        
+        # Optimize parameters - remove 'self' and empty parameter lists
+        if method.get('parameters'):
+            opt_params = []
+            for param in method['parameters']:
+                if param.get('name') != 'self':  # Skip self parameters
+                    opt_params.append(param)
+            if opt_params:  # Only include if non-empty after filtering
+                opt_method['parameters'] = opt_params
+        
+        # Only include calls if non-empty
+        if method.get('calls'):
+            opt_method['calls'] = method['calls']
+        
+        return opt_method
+    
+    def _optimize_variables(self, variables: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Optimize variable representations, only keeping meaningful ones."""
+        optimized = []
+        for var in variables:
+            # Only keep variables that have values or non-standard kinds
+            if (var.get('value') or 
+                var.get('kind') != 'external_variable'):
+                optimized.append(var)
+        return optimized if optimized else None
+    
     def build_knowledge_base(self) -> None:
         """Build the knowledge base by analyzing all supported files in the project."""
         skipped_files_log = []
@@ -274,7 +403,8 @@ class KnowledgeBase:
                         kb_file.parent.mkdir(parents=True, exist_ok=True)
                         try:
                             with open(kb_file, 'w', encoding='utf-8') as f:
-                                json.dump(analysis, f, indent=2)
+                                # Use compact JSON formatting to save tokens
+                                json.dump(analysis, f, separators=(',', ':'), ensure_ascii=False)
                             analyzed_files_count += 1
                         except IOError as e:
                             logger.error(f"Failed to write knowledge base file {kb_file}: {e}")
