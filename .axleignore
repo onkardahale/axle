@@ -76,6 +76,7 @@ documentation/
 *.sqlite
 *.sqlite3
 
+src/grammars/*
 # Example ignore patterns:
 # Ignore all test directories: test*/
 # Ignore specific file types: *.min.js
