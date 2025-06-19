@@ -26,10 +26,15 @@ class JuliaAnalyzer(BaseAnalyzer):
             # First try the standard tree-based analysis
             result = super().analyze_file(file_path)
             
-            # If it's a failed analysis due to parsing errors, try recovery
+            # If it's a failed analysis due to parsing errors, check if recovery is worth it
             if isinstance(result, FailedAnalysis) and "syntax error" in result.reason.lower():
-                logger.info(f"Attempting error recovery for {file_path}")
-                return self._analyze_with_recovery(file_path)
+                # Only attempt recovery for recoverable syntax errors
+                if self._is_recoverable_syntax_error(file_path):
+                    logger.info(f"Attempting error recovery for {file_path}")
+                    return self._analyze_with_recovery(file_path)
+                else:
+                    # Return the failed analysis for severe syntax errors
+                    return result
             
             return result
             
@@ -37,6 +42,87 @@ class JuliaAnalyzer(BaseAnalyzer):
             logger.warning(f"Standard analysis failed for {file_path}: {e}")
             return self._analyze_with_recovery(file_path)
     
+    def _is_recoverable_syntax_error(self, file_path: Path) -> bool:
+        """Determine if a syntax error is recoverable or too severe."""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+            
+            # Remove comments to avoid false positives
+            lines = content.split('\n')
+            code_lines = []
+            for line in lines:
+                # Remove comments but keep the line structure
+                if '#' in line:
+                    code_part = line.split('#')[0].strip()
+                    if code_part:
+                        code_lines.append(code_part)
+                else:
+                    code_lines.append(line.strip())
+            
+            code_only = '\n'.join(code_lines).strip()
+            
+            # Check for severe syntax errors that shouldn't be recovered
+            severe_errors = [
+                # Unclosed function definitions - check if function has opening ( but no closing )
+                self._has_unclosed_function,
+                # Unclosed struct definitions  
+                lambda c: 'struct ' in c and c.count('struct') > c.count('end'),
+                # Completely malformed code
+                lambda c: len(c) < 5,  # Too short to be meaningful
+            ]
+            
+            # If any severe error condition is met, don't attempt recovery
+            for check in severe_errors:
+                if check(code_only):
+                    return False
+                    
+            return True
+            
+        except Exception:
+            # If we can't read the file or check, don't attempt recovery
+            return False
+    
+    def _has_unclosed_function(self, code: str) -> bool:
+        """Check if code has unclosed function definitions."""
+        import re
+        
+        # Find function definitions
+        func_pattern = r'function\s+\w+\s*\('
+        functions = re.findall(func_pattern, code)
+        
+        if not functions:
+            return False
+            
+        # For each function found, check if it's properly closed
+        for func_match in functions:
+            # Find the position of this function
+            func_start = code.find(func_match)
+            if func_start == -1:
+                continue
+                
+            # Look for the matching closing parenthesis
+            paren_count = 0
+            found_closing_paren = False
+            
+            # Start after the opening parenthesis
+            search_start = func_start + func_match.find('(') + 1
+            
+            for i in range(search_start, len(code)):
+                if code[i] == '(':
+                    paren_count += 1
+                elif code[i] == ')':
+                    if paren_count == 0:
+                        found_closing_paren = True
+                        break
+                    paren_count -= 1
+            
+            # If we didn't find a closing parenthesis, this is an unclosed function
+            if not found_closing_paren:
+                return True
+                
+        return False
+
     def _analyze_with_recovery(self, file_path: Path) -> FileAnalysis:
         """Analyze a file using error recovery techniques."""
         try:
