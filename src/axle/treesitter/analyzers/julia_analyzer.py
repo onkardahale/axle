@@ -1,6 +1,7 @@
 """Julia language analyzer for Tree-sitter."""
 
 import logging
+import re
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from tree_sitter import Tree, Node
@@ -8,7 +9,7 @@ from tree_sitter import Tree, Node
 from .base import BaseAnalyzer
 from ..models import (
     FileAnalysis, Import, Class, Function, Variable, Parameter, 
-    BaseClass, Method, Attribute
+    BaseClass, Method, Attribute, FailedAnalysis
 )
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,307 @@ class JuliaAnalyzer(BaseAnalyzer):
     LANGUAGE_NAME = "julia"
     FILE_EXTENSIONS = (".jl",)
     
+    def analyze_file(self, file_path: Path) -> FileAnalysis:
+        """Analyze a Julia file with robust error handling."""
+        try:
+            # First try the standard tree-based analysis
+            result = super().analyze_file(file_path)
+            
+            # If it's a failed analysis due to parsing errors, try recovery
+            if isinstance(result, FailedAnalysis) and "syntax error" in result.reason.lower():
+                logger.info(f"Attempting error recovery for {file_path}")
+                return self._analyze_with_recovery(file_path)
+            
+            return result
+            
+        except Exception as e:
+            logger.warning(f"Standard analysis failed for {file_path}: {e}")
+            return self._analyze_with_recovery(file_path)
+    
+    def _analyze_with_recovery(self, file_path: Path) -> FileAnalysis:
+        """Analyze a file using error recovery techniques."""
+        try:
+            with open(file_path, 'rb') as f:
+                source_code = f.read()
+            
+            # Parse with TreeSitter (even if it has errors)
+            tree = self.parser.parse(source_code)
+            
+            # Extract what we can from the partial tree
+            partial_analysis = self._extract_from_partial_tree(tree, source_code, file_path)
+            
+            # Supplement with regex-based extraction for missed constructs
+            regex_analysis = self._regex_based_extraction(source_code, file_path)
+            
+            # Combine results
+            return self._merge_analyses(partial_analysis, regex_analysis, file_path)
+            
+        except Exception as e:
+            logger.error(f"Error recovery failed for {file_path}: {e}")
+            return FailedAnalysis(
+                file_path=str(file_path),  
+                analyzer=f"treesitter_{self.LANGUAGE_NAME}",
+                reason=f"Complete parsing failure: {str(e)}"
+            )
+    
+    def _extract_from_partial_tree(self, tree: Tree, source_code: bytes, file_path: Path) -> FileAnalysis:
+        """Extract information from a partially parsed tree, ignoring error nodes."""
+        root_node = tree.root_node
+        
+        imports = []
+        classes = []
+        functions = []
+        variables = []
+        
+        # Recursively process all non-error nodes
+        self._process_node_recursively(root_node, source_code, imports, classes, functions, variables)
+        
+        return FileAnalysis(
+            file_path=str(file_path),
+            analyzer=f"treesitter_{self.LANGUAGE_NAME}",
+            imports=imports if imports else None,
+            classes=classes if classes else None,
+            functions=functions if functions else None,
+            variables=variables if variables else None
+        )
+    
+    def _process_node_recursively(self, node: Node, source_code: bytes, imports: List, classes: List, functions: List, variables: List):
+        """Process a node and its children, skipping error nodes."""
+        # Skip error nodes but process their children if they have any meaningful content
+        if node.type == 'ERROR':
+            # Still try to process children in case there are recoverable constructs
+            for child in node.children:
+                if child.type != 'ERROR':
+                    self._process_node_recursively(child, source_code, imports, classes, functions, variables)
+            return
+        
+        # Process known construct types
+        if node.type in ["using_statement", "import_statement"]:
+            import_info = self._safe_extract_import(node, source_code)
+            if import_info:
+                imports.append(import_info)
+        
+        elif node.type == "function_definition":
+            func_info = self._safe_extract_function(node, source_code)
+            if func_info:
+                functions.append(func_info)
+        
+        elif node.type == "assignment":
+            if self._is_short_form_function(node, source_code):
+                func_info = self._safe_extract_short_form_function(node, source_code)
+                if func_info:
+                    functions.append(func_info)
+            else:
+                var_info = self._safe_extract_variable(node, source_code)
+                if var_info:
+                    variables.append(var_info)
+        
+        elif node.type == "struct_definition":
+            class_info = self._safe_extract_struct(node, source_code)
+            if class_info:
+                classes.append(class_info)
+        
+        elif node.type == "const_statement":
+            var_info = self._safe_extract_const_variable(node, source_code)
+            if var_info:
+                variables.append(var_info)
+        
+        elif node.type == "macro_definition":
+            func_info = self._safe_extract_macro(node, source_code)
+            if func_info:
+                functions.append(func_info)
+        
+        # Process children recursively
+        for child in node.children:
+            self._process_node_recursively(child, source_code, imports, classes, functions, variables)
+    
+    def _safe_extract_import(self, node: Node, source_code: bytes) -> Optional[Import]:
+        """Safely extract import with error handling."""
+        try:
+            return self._extract_import(node, source_code)
+        except Exception as e:
+            logger.debug(f"Failed to extract import from node: {e}")
+            return None
+    
+    def _safe_extract_function(self, node: Node, source_code: bytes) -> Optional[Function]:
+        """Safely extract function with error handling."""
+        try:
+            return self._extract_function(node, source_code)
+        except Exception as e:
+            logger.debug(f"Failed to extract function from node: {e}")
+            # Fallback: try to at least get the function name
+            try:
+                name = self._extract_function_name_fallback(node, source_code)
+                if name:
+                    return Function(name=name, parameters=None, docstring=None)
+            except:
+                pass
+            return None
+    
+    def _safe_extract_short_form_function(self, node: Node, source_code: bytes) -> Optional[Function]:
+        """Safely extract short-form function with error handling."""
+        try:
+            return self._extract_short_form_function(node, source_code)
+        except Exception as e:
+            logger.debug(f"Failed to extract short-form function from node: {e}")
+            return None
+    
+    def _safe_extract_struct(self, node: Node, source_code: bytes) -> Optional[Class]:
+        """Safely extract struct with error handling."""
+        try:
+            return self._extract_struct(node, source_code)
+        except Exception as e:
+            logger.debug(f"Failed to extract struct from node: {e}")
+            # Fallback: try to at least get the struct name
+            try:
+                name = self._extract_struct_name_fallback(node, source_code)
+                if name:
+                    return Class(name=name, methods=None, attributes=None, bases=None, docstring=None)
+            except:
+                pass
+            return None
+    
+    def _safe_extract_variable(self, node: Node, source_code: bytes) -> Optional[Variable]:
+        """Safely extract variable with error handling."""
+        try:
+            return self._extract_variable(node, source_code)
+        except Exception as e:
+            logger.debug(f"Failed to extract variable from node: {e}")
+            return None
+    
+    def _safe_extract_const_variable(self, node: Node, source_code: bytes) -> Optional[Variable]:
+        """Safely extract const variable with error handling."""
+        try:
+            return self._extract_const_variable(node, source_code)
+        except Exception as e:
+            logger.debug(f"Failed to extract const variable from node: {e}")
+            return None
+    
+    def _safe_extract_macro(self, node: Node, source_code: bytes) -> Optional[Function]:
+        """Safely extract macro with error handling."""
+        try:
+            return self._extract_macro(node, source_code)
+        except Exception as e:
+            logger.debug(f"Failed to extract macro from node: {e}")
+            return None
+    
+    def _extract_function_name_fallback(self, node: Node, source_code: bytes) -> Optional[str]:
+        """Extract function name as fallback when full parsing fails."""
+        # Look for function keyword followed by identifier
+        for child in node.children:
+            if child.type == "signature":
+                for signature_child in child.children:
+                    if signature_child.type == "identifier":
+                        return self._get_node_text(signature_child, source_code)
+        return None
+    
+    def _extract_struct_name_fallback(self, node: Node, source_code: bytes) -> Optional[str]:
+        """Extract struct name as fallback when full parsing fails."""
+        # Look for struct keyword followed by type_head
+        for child in node.children:
+            if child.type == "type_head":
+                for type_child in child.children:
+                    if type_child.type == "identifier":
+                        return self._get_node_text(type_child, source_code)
+        return None
+    
+    def _regex_based_extraction(self, source_code: bytes, file_path: Path) -> Dict[str, List]:
+        """Extract constructs using regex patterns as a backup."""
+        text = source_code.decode('utf-8', errors='replace')
+        
+        results = {
+            'imports': [],
+            'functions': [],
+            'structs': [],
+            'constants': [],
+            'macros': []
+        }
+        
+        # Extract imports
+        import_patterns = [
+            r'^\s*using\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)',
+            r'^\s*import\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)',
+        ]
+        
+        for pattern in import_patterns:
+            for match in re.finditer(pattern, text, re.MULTILINE):
+                module_name = match.group(1)
+                results['imports'].append(Import(source=module_name))
+        
+        # Extract function definitions
+        function_patterns = [
+            r'^\s*function\s+([A-Za-z_][A-Za-z0-9_!]*)\s*\(',
+            r'^\s*([A-Za-z_][A-Za-z0-9_!]*)\s*\([^)]*\)\s*=',  # Short form
+        ]
+        
+        for pattern in function_patterns:
+            for match in re.finditer(pattern, text, re.MULTILINE):
+                func_name = match.group(1)
+                results['functions'].append(Function(name=func_name, parameters=None, docstring=None))
+        
+        # Extract struct definitions
+        struct_pattern = r'^\s*(?:mutable\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)'
+        for match in re.finditer(struct_pattern, text, re.MULTILINE):
+            struct_name = match.group(1)
+            results['structs'].append(Class(name=struct_name, methods=None, attributes=None, bases=None, docstring=None))
+        
+        # Extract constants
+        const_pattern = r'^\s*const\s+([A-Za-z_][A-Za-z0-9_]*)\s*='
+        for match in re.finditer(const_pattern, text, re.MULTILINE):
+            const_name = match.group(1)
+            results['constants'].append(Variable(name=const_name, kind="constant", type=None, docstring=None))
+        
+        # Extract macros
+        macro_pattern = r'^\s*macro\s+([A-Za-z_][A-Za-z0-9_]*)\s*\('
+        for match in re.finditer(macro_pattern, text, re.MULTILINE):
+            macro_name = match.group(1)
+            results['macros'].append(Function(name=f"@{macro_name}", parameters=None, docstring=None))
+        
+        return results
+    
+    def _merge_analyses(self, partial_analysis: FileAnalysis, regex_analysis: Dict, file_path: Path) -> FileAnalysis:
+        """Merge results from partial tree analysis and regex extraction."""
+        
+        # Combine imports
+        all_imports = list(partial_analysis.imports or [])
+        seen_imports = {imp.source for imp in all_imports}
+        for regex_import in regex_analysis['imports']:
+            if regex_import.source not in seen_imports:
+                all_imports.append(regex_import)
+        
+        # Combine functions
+        all_functions = list(partial_analysis.functions or [])
+        seen_functions = {func.name for func in all_functions}
+        for regex_func in regex_analysis['functions']:
+            if regex_func.name not in seen_functions:
+                all_functions.append(regex_func)
+        for regex_macro in regex_analysis['macros']:
+            if regex_macro.name not in seen_functions:
+                all_functions.append(regex_macro)
+        
+        # Combine classes/structs
+        all_classes = list(partial_analysis.classes or [])
+        seen_classes = {cls.name for cls in all_classes}
+        for regex_struct in regex_analysis['structs']:
+            if regex_struct.name not in seen_classes:
+                all_classes.append(regex_struct)
+        
+        # Combine variables
+        all_variables = list(partial_analysis.variables or [])
+        seen_variables = {var.name for var in all_variables}
+        for regex_const in regex_analysis['constants']:
+            if regex_const.name not in seen_variables:
+                all_variables.append(regex_const)
+        
+        return FileAnalysis(
+            file_path=str(file_path),
+            analyzer=f"treesitter_{self.LANGUAGE_NAME}",
+            imports=all_imports if all_imports else None,
+            classes=all_classes if all_classes else None,
+            functions=all_functions if all_functions else None,
+            variables=all_variables if all_variables else None
+        )
+
     def _analyze_tree(self, tree: Tree, source_code: bytes, file_path: Path) -> FileAnalysis:
         """Analyze the Julia syntax tree and extract structural information."""
         root_node = tree.root_node
