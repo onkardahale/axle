@@ -115,7 +115,8 @@ Axle supports multiple programming languages through dedicated analyzers:
 ### **Currently Supported:**
 - **Python** (`.py`)
 - **JavaScript** (`.js`, `.jsx`, `.mjs`, `.cjs`)
-- **C/C++** (`.c`, `.cpp`, `.cc`, `.cxx`, `.h`, `.hpp`, `.hxx`) ✨ *New!*
+- **C++** (`.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx`)
+- **Julia** (`.jl`) ✨ *New!*
 
 ### **Planned Languages:**
 - TypeScript (`.ts`, `.tsx`)
@@ -150,7 +151,7 @@ To add support for a new language:
 3. **Add tests** in `tests/test_<language>_analyzer.py`
 4. **Update documentation**
 
-See `javascript_analyzer.py` and `cpp_analyzer.py` for reference implementations.
+See `javascript_analyzer.py`, `cpp_analyzer.py`, and `julia_analyzer.py` for reference implementations.
 
 ## Interactive Features
 
