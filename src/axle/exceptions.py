@@ -12,4 +12,8 @@ class KnowledgeBaseError(AxleError):
 
 class AIError(AxleError):
     """Raised for AI-related errors."""
+    pass
+
+class DependencyError(AxleError):
+    """Raised for dependency-related errors."""
     pass 

@@ -5,6 +5,7 @@ import click
 import tempfile 
 import os       
 import subprocess 
+import warnings
 from pathlib import Path
 from . import __version__
 from .git_utils import is_git_installed, get_staged_diff, get_staged_files_count, get_staged_file_paths
@@ -12,7 +13,13 @@ from .commit_message import derive_scope
 from .editor_utils import open_editor
 from .ai_utils import generate_commit_message
 from .knowledge_base import KnowledgeBase
-from .exceptions import AxleError, GitError, AIError
+from .exceptions import AxleError, GitError, AIError, DependencyError
+
+# Suppress verbose warnings for better user experience
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+warnings.filterwarnings("ignore", message=".*bitsandbytes.*")
+warnings.filterwarnings("ignore", message=".*torch_dtype.*")
+warnings.filterwarnings("ignore", message=".*device_map.*")
 
 def print_version(ctx, param, value):
     if not value or ctx.resilient_parsing:
@@ -23,9 +30,18 @@ def print_version(ctx, param, value):
 @click.group()
 @click.option('--version', is_flag=True, callback=print_version,
               expose_value=False, is_eager=True, help='Show version and exit.')
-def main():
+@click.option('--verbose', '-v', is_flag=True, help='Show detailed error messages and warnings.')
+@click.pass_context
+def main(ctx, verbose):
     """Generate commit messages using AI based on staged changes."""
-    pass
+    ctx.ensure_object(dict)
+    ctx.obj['verbose'] = verbose
+    
+    if not verbose:
+        # Further suppress warnings if not in verbose mode
+        import logging
+        logging.getLogger("transformers").setLevel(logging.ERROR)
+        logging.getLogger("torch").setLevel(logging.ERROR)
 
 @main.command()
 def init():
@@ -178,12 +194,49 @@ def _commit_workflow(regenerate: bool):
 
 @main.command()
 @click.option('--regenerate', is_flag=True, help='Regenerate the commit message with additional context')
-def commit(regenerate):
+@click.pass_context
+def commit(ctx, regenerate):
     """Generate a commit message using AI based on staged changes."""
+    verbose = ctx.obj.get('verbose', False) if ctx.obj else False
+    
     try:
         _commit_workflow(regenerate)
     except AxleError as e:
         click.echo(f"Error: {e}", err=True)
+        if verbose:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
+    except ImportError as e:
+        if "bitsandbytes" in str(e).lower():
+            click.echo("⚠️  Some model optimization features are not available on this system.", err=True)
+            click.echo("   The tool will continue with reduced performance.", err=True)
+            click.echo("   For better performance, consider using a Linux system with CUDA support.", err=True)
+        else:
+            click.echo(f"Error: Missing dependency - {e}", err=True)
+        
+        if verbose:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
+    except Exception as e:
+        # Catch all other exceptions and provide clean error messages
+        error_msg = str(e)
+        if "bitsandbytes" in error_msg.lower():
+            click.echo("⚠️  Model loading encountered compatibility issues.", err=True)
+            click.echo("   This is often due to system compatibility with quantization libraries.", err=True)
+            click.echo("   Try running: pip install --upgrade transformers torch", err=True)
+        elif "torch" in error_msg.lower() or "cuda" in error_msg.lower():
+            click.echo("⚠️  GPU/compute library issues detected.", err=True)
+            click.echo("   The tool will attempt to use CPU-only mode.", err=True)
+        else:
+            click.echo(f"Unexpected error: {error_msg}", err=True)
+        
+        if verbose:
+            import traceback
+            traceback.print_exc()
+        else:
+            click.echo("   Run with --verbose for detailed error information.", err=True)
         sys.exit(1)
 
 if __name__ == '__main__':

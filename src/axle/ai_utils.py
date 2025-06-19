@@ -1,6 +1,5 @@
 import os
 from typing import Optional, Tuple, List
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import torch
 from transformers.utils import logging
 import json
@@ -11,6 +10,18 @@ from functools import lru_cache
 from jinja2 import Environment, FileSystemLoader
 import re
 import time
+
+# Import bitsandbytes and transformers with proper error handling
+try:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import BitsAndBytesConfig
+    QUANTIZATION_AVAILABLE = True
+except ImportError as e:
+    # Fallback for when bitsandbytes is not available
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    QUANTIZATION_AVAILABLE = False
+    import warnings
+    warnings.filterwarnings("ignore", message=".*bitsandbytes.*")
 
 # Set tokenizers parallelism to false to avoid warnings
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -86,6 +97,10 @@ def set_quantization_level(level: str = "4bit_aggressive"):
             - "4bit_aggressive": Aggressive 4-bit quantization (maximum compression)
             - "3bit": Experimental 3-bit quantization (extreme compression)
     """
+    if not QUANTIZATION_AVAILABLE and level != "none":
+        print("Quantization not available on this system - falling back to full precision")
+        level = "none"
+    
     config = get_model_config()
     config["quantization"] = level
     save_model_config(config)
@@ -93,8 +108,8 @@ def set_quantization_level(level: str = "4bit_aggressive"):
     # Clear the cached model to force reload with new quantization
     get_model_and_tokenizer.cache_clear()
     
-    print(f"✅ Quantization level set to: {level}")
-    print("🔄 Model cache cleared - next model load will use new quantization settings")
+    print(f"Quantization level set to: {level}")
+    print("Model cache cleared - next model load will use new quantization settings")
     
     # Print compression info
     compression_info = {
@@ -106,7 +121,7 @@ def set_quantization_level(level: str = "4bit_aggressive"):
     }
     
     if level in compression_info:
-        print(f"📊 Expected compression: {compression_info[level]}")
+        print(f"Expected compression: {compression_info[level]}")
     
     return config
 
@@ -129,49 +144,59 @@ def get_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     quantization_type = config.get("quantization", "none")
     quantization_config = None
     
-    if quantization_type == "8bit":
-        quantization_config = BitsAndBytesConfig(
-            load_in_8bit=True,
-            llm_int8_threshold=6.0,
-            llm_int8_has_fp16_weight=False,
-        )
-    elif quantization_type == "4bit":
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",  # NormalFloat4 for better accuracy
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,  # Double quantization for more compression
-            bnb_4bit_quant_storage=torch.uint8,  # More compact storage
-        )
-    elif quantization_type == "4bit_aggressive":
-        # More aggressive 4-bit quantization for maximum compression
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="fp4",  # FP4 for maximum compression
-            bnb_4bit_compute_dtype=torch.bfloat16,  # BFloat16 for efficiency
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_storage=torch.uint8,
-        )
-    elif quantization_type == "3bit":
-        # Experimental 3-bit quantization (if supported)
+    # Only set up quantization if bitsandbytes is available
+    if QUANTIZATION_AVAILABLE and quantization_type != "none":
         try:
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,  # Use 4-bit infrastructure
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_storage=torch.uint8,
-                # Additional compression settings
-            )
-        except Exception:
-            # Fallback to aggressive 4-bit if 3-bit not supported
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="fp4",
-                bnb_4bit_compute_dtype=torch.bfloat16,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_storage=torch.uint8,
-            )
+            if quantization_type == "8bit":
+                quantization_config = BitsAndBytesConfig(
+                    load_in_8bit=True,
+                    llm_int8_threshold=6.0,
+                    llm_int8_has_fp16_weight=False,
+                )
+            elif quantization_type == "4bit":
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",  # NormalFloat4 for better accuracy
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_use_double_quant=True,  # Double quantization for more compression
+                    bnb_4bit_quant_storage=torch.uint8,  # More compact storage
+                )
+            elif quantization_type == "4bit_aggressive":
+                # More aggressive 4-bit quantization for maximum compression
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="fp4",  # FP4 for maximum compression
+                    bnb_4bit_compute_dtype=torch.bfloat16,  # BFloat16 for efficiency
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_storage=torch.uint8,
+                )
+            elif quantization_type == "3bit":
+                # Experimental 3-bit quantization (if supported)
+                try:
+                    quantization_config = BitsAndBytesConfig(
+                        load_in_4bit=True,  # Use 4-bit infrastructure
+                        bnb_4bit_quant_type="nf4",
+                        bnb_4bit_compute_dtype=torch.float16,
+                        bnb_4bit_use_double_quant=True,
+                        bnb_4bit_quant_storage=torch.uint8,
+                        # Additional compression settings
+                    )
+                except Exception:
+                    # Fallback to aggressive 4-bit if 3-bit not supported
+                    quantization_config = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_quant_type="fp4",
+                        bnb_4bit_compute_dtype=torch.bfloat16,
+                        bnb_4bit_use_double_quant=True,
+                        bnb_4bit_quant_storage=torch.uint8,
+                    )
+        except Exception as e:
+            # If quantization setup fails, fall back to no quantization
+            print(f"⚠️  Quantization setup failed: {str(e)}")
+            print("   Falling back to full precision model")
+            quantization_config = None
+    elif not QUANTIZATION_AVAILABLE and quantization_type != "none":
+        print("⚠️  Quantization requested but not available - using full precision")
     
     try:
         tokenizer = AutoTokenizer.from_pretrained(
