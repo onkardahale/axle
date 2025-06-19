@@ -1,4 +1,5 @@
 import os
+import sys
 from typing import Optional, Tuple, List
 import torch
 from transformers.utils import logging
@@ -10,16 +11,62 @@ from functools import lru_cache
 from jinja2 import Environment, FileSystemLoader
 import re
 import time
+from contextlib import contextmanager
+
+# Suppress stderr during import
+@contextmanager  
+def suppress_stderr():
+    """Context manager to suppress stderr output."""
+    with open(os.devnull, "w") as devnull:
+        old_stderr = sys.stderr
+        sys.stderr = devnull
+        try:
+            yield
+        finally:
+            sys.stderr = old_stderr
 
 # Import bitsandbytes and transformers with proper error handling
+QUANTIZATION_AVAILABLE = False
+COMPATIBILITY_MESSAGE_SHOWN = False
+
+# Single source of truth for compatibility messages
+COMPATIBILITY_MESSAGES = [
+    "⚠️  AI model quantization unavailable (will use GPU if present)",
+    "   → This is normal on macOS - quantization requires specific libraries", 
+    "   → Tool will work normally, may be slower without quantization"
+]
+
+def show_compatibility_message(writer=None):
+    """Show a clean compatibility message for end users."""
+    global COMPATIBILITY_MESSAGE_SHOWN
+    if not COMPATIBILITY_MESSAGE_SHOWN:
+        if writer:
+            # Write to provided writer (e.g., stderr)
+            writer.write("\n" + "\n".join(COMPATIBILITY_MESSAGES) + "\n\n")
+        else:
+            # Default to stdout
+            for message in COMPATIBILITY_MESSAGES:
+                print(message)
+            print()
+        COMPATIBILITY_MESSAGE_SHOWN = True
+
+
 try:
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    from transformers import BitsAndBytesConfig
+    # Suppress the noisy bitsandbytes import errors
+    with suppress_stderr():
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import BitsAndBytesConfig
     QUANTIZATION_AVAILABLE = True
 except ImportError as e:
     # Fallback for when bitsandbytes is not available
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    QUANTIZATION_AVAILABLE = False
+    try:
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        QUANTIZATION_AVAILABLE = False
+        # Show clean message instead of suppressing completely
+        show_compatibility_message()
+    except ImportError:
+        # If even basic transformers fail, raise a clear error
+        raise ImportError("transformers library is required but not installed. Please run: pip install transformers torch")
     import warnings
     warnings.filterwarnings("ignore", message=".*bitsandbytes.*")
 
@@ -199,22 +246,24 @@ def get_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
         print("⚠️  Quantization requested but not available - using full precision")
     
     try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
-            cache_dir=str(cache_dir_models), # cache_dir expects a string
-            trust_remote_code=True,
-            local_files_only=False
-        )
-        
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            cache_dir=str(cache_dir_models), # cache_dir expects a string
-            trust_remote_code=True,
-            local_files_only=False,
-            quantization_config=quantization_config,
-            device_map="auto",
-            torch_dtype=torch.float16 if quantization_config is None else None,
-        )
+        # Suppress stderr during model loading for cleaner output
+        with suppress_stderr():
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_name,
+                cache_dir=str(cache_dir_models), # cache_dir expects a string
+                trust_remote_code=True,
+                local_files_only=False
+            )
+            
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                cache_dir=str(cache_dir_models), # cache_dir expects a string
+                trust_remote_code=True,
+                local_files_only=False,
+                quantization_config=quantization_config,
+                device_map="auto",
+                torch_dtype=torch.float16 if quantization_config is None else None,
+            )
         
         # Set padding token if not set, common for generation
         if tokenizer.pad_token is None:
@@ -224,7 +273,59 @@ def get_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
         return model, tokenizer
         
     except Exception as e:
-        raise ModelLoadError(f"Failed to load model or tokenizer: {str(e)}")
+        error_msg = str(e)
+        if "quantized model" in error_msg or "device_map" in error_msg or "CPU or the disk" in error_msg:
+            # This is a quantization/device mapping issue - try fallback without quantization
+            print("   → Retrying without model optimization...")
+            
+            # Clear the cache and update config to prevent quantization on retry
+            get_model_and_tokenizer.cache_clear()
+            config = get_model_config()
+            config["quantization"] = "none"
+            save_model_config(config)
+            
+            try:
+                with suppress_stderr():
+                    tokenizer = AutoTokenizer.from_pretrained(
+                        model_name,
+                        cache_dir=str(cache_dir_models),
+                        trust_remote_code=True,
+                        local_files_only=False
+                    )
+                    
+                    # Retry without quantization but still try to use GPU if available
+                    model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
+                        cache_dir=str(cache_dir_models),
+                        trust_remote_code=True,
+                        local_files_only=False,
+                        quantization_config=None,  # No quantization
+                        device_map="auto",  # Try to use GPU if available
+                        torch_dtype=torch.float16,  # Keep float16 for better performance
+                        low_cpu_mem_usage=True,  # Memory optimization
+                    )
+                
+                # Set padding token if not set
+                if tokenizer.pad_token is None:
+                    tokenizer.pad_token = tokenizer.eos_token
+                    model.config.pad_token_id = model.config.eos_token_id
+                
+                # Check what device the model ended up on
+                if hasattr(model, 'device'):
+                    device_info = f"on {model.device}"
+                elif hasattr(model, 'hf_device_map'):
+                    devices = set(model.hf_device_map.values()) if model.hf_device_map else {"cpu"}
+                    device_info = f"on {', '.join(map(str, devices))}"
+                else:
+                    device_info = "device auto-selected"
+                
+                print(f"   → Successfully loaded model without quantization ({device_info})")
+                return model, tokenizer
+                
+            except Exception as fallback_error:
+                raise ModelLoadError(f"Failed to load model even in fallback mode: {str(fallback_error)}")
+        else:
+            raise ModelLoadError(f"Failed to load model or tokenizer: {str(e)}")
 
 def _render_prompt(template_name: str, **kwargs) -> str:
     """Renders a Jinja2 prompt template."""

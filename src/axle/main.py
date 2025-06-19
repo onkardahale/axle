@@ -1,25 +1,92 @@
 #!/usr/bin/env python3
 
 import sys
-import click
-import tempfile 
-import os       
-import subprocess 
+import os
 import warnings
+from io import StringIO
+
+# Suppress bitsandbytes errors and warnings for better user experience
+# This must be done before any other imports that might trigger bitsandbytes
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
+# Create a custom stderr handler that filters out bitsandbytes messages
+class FilteredStderr:
+    def __init__(self, original_stderr):
+        self.original_stderr = original_stderr
+        self.buffer = ""
+        self.bitsandbytes_warning_shown = False
+        
+    def write(self, text):
+        # Check for bitsandbytes related error messages
+        if any(keyword in text.lower() for keyword in ["bitsandbytes", "libbitsandbytes", "dlopen"]) and "bitsandbytes" in text.lower():
+            # Show a clean warning once, then suppress verbose details
+            if not self.bitsandbytes_warning_shown:
+                show_compatibility_message(writer=self.original_stderr)
+                self.bitsandbytes_warning_shown = True
+            return  # Suppress the verbose error details
+        
+        # For traceback lines, check if they're part of a bitsandbytes error
+        if text.strip().startswith(('File "', '  File "', 'Traceback', '    ', 'OSError:', 'ImportError:')):
+            # Buffer the text to see if it's part of a bitsandbytes traceback
+            self.buffer += text
+            if "bitsandbytes" in self.buffer:
+                # Show clean message once if not already shown
+                if not self.bitsandbytes_warning_shown:
+                    show_compatibility_message(writer=self.original_stderr)
+                    self.bitsandbytes_warning_shown = True
+                self.buffer = ""  # Clear buffer after handling
+                return  # Suppress bitsandbytes tracebacks
+            elif text.strip() and not text.strip().startswith(('File "', '  File "', '    ', 'Traceback', 'OSError:', 'ImportError:')):
+                # Not a traceback continuation, flush buffer
+                if self.buffer:
+                    self.original_stderr.write(self.buffer)
+                    self.buffer = ""
+                self.original_stderr.write(text)
+        else:
+            # Regular message, flush buffer if any and write
+            if self.buffer:
+                self.original_stderr.write(self.buffer)
+                self.buffer = ""
+            self.original_stderr.write(text)
+    
+    def flush(self):
+        if self.buffer:
+            self.original_stderr.write(self.buffer)
+            self.buffer = ""
+        self.original_stderr.flush()
+    
+    def __getattr__(self, name):
+        return getattr(self.original_stderr, name)
+
+# Only install the filter if not in verbose mode
+if not (len(sys.argv) > 1 and ("--verbose" in sys.argv or "-v" in sys.argv)):
+    sys.stderr = FilteredStderr(sys.stderr)
+    
+    import logging
+    # Disable noisy library logging
+    logging.getLogger("transformers").setLevel(logging.ERROR)
+    logging.getLogger("torch").setLevel(logging.ERROR)
+    logging.getLogger("bitsandbytes").setLevel(logging.ERROR)
+    
+    # Suppress specific warnings
+    warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+    warnings.filterwarnings("ignore", message=".*bitsandbytes.*")
+    warnings.filterwarnings("ignore", message=".*torch_dtype.*")
+    warnings.filterwarnings("ignore", message=".*device_map.*")
+    warnings.filterwarnings("ignore", message=".*Loading.*")
+
+import click
+import tempfile      
+import subprocess 
 from pathlib import Path
 from . import __version__
 from .git_utils import is_git_installed, get_staged_diff, get_staged_files_count, get_staged_file_paths
 from .commit_message import derive_scope
 from .editor_utils import open_editor
-from .ai_utils import generate_commit_message
+from .ai_utils import generate_commit_message, show_compatibility_message
 from .knowledge_base import KnowledgeBase
 from .exceptions import AxleError, GitError, AIError, DependencyError
-
-# Suppress verbose warnings for better user experience
-warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
-warnings.filterwarnings("ignore", message=".*bitsandbytes.*")
-warnings.filterwarnings("ignore", message=".*torch_dtype.*")
-warnings.filterwarnings("ignore", message=".*device_map.*")
 
 def print_version(ctx, param, value):
     if not value or ctx.resilient_parsing:
