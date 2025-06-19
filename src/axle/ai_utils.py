@@ -1,6 +1,6 @@
 import os
+import sys
 from typing import Optional, Tuple, List
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import torch
 from transformers.utils import logging
 import json
@@ -11,6 +11,64 @@ from functools import lru_cache
 from jinja2 import Environment, FileSystemLoader
 import re
 import time
+from contextlib import contextmanager
+
+# Suppress stderr during import
+@contextmanager  
+def suppress_stderr():
+    """Context manager to suppress stderr output."""
+    with open(os.devnull, "w") as devnull:
+        old_stderr = sys.stderr
+        sys.stderr = devnull
+        try:
+            yield
+        finally:
+            sys.stderr = old_stderr
+
+# Import bitsandbytes and transformers with proper error handling
+QUANTIZATION_AVAILABLE = False
+COMPATIBILITY_MESSAGE_SHOWN = False
+
+# Single source of truth for compatibility messages
+COMPATIBILITY_MESSAGES = [
+    "⚠️  AI model quantization unavailable (will use GPU if present)",
+    "   → This is normal on macOS - quantization requires specific libraries", 
+    "   → Tool will work normally, may be slower without quantization"
+]
+
+def show_compatibility_message(writer=None):
+    """Show a clean compatibility message for end users."""
+    global COMPATIBILITY_MESSAGE_SHOWN
+    if not COMPATIBILITY_MESSAGE_SHOWN:
+        if writer:
+            # Write to provided writer (e.g., stderr)
+            writer.write("\n" + "\n".join(COMPATIBILITY_MESSAGES) + "\n\n")
+        else:
+            # Default to stdout
+            for message in COMPATIBILITY_MESSAGES:
+                print(message)
+            print()
+        COMPATIBILITY_MESSAGE_SHOWN = True
+
+
+try:
+    # Suppress the noisy bitsandbytes import errors
+    with suppress_stderr():
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import BitsAndBytesConfig
+    QUANTIZATION_AVAILABLE = True
+except ImportError as e:
+    # Fallback for when bitsandbytes is not available
+    try:
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        QUANTIZATION_AVAILABLE = False
+        # Show clean message instead of suppressing completely
+        show_compatibility_message()
+    except ImportError:
+        # If even basic transformers fail, raise a clear error
+        raise ImportError("transformers library is required but not installed. Please run: pip install transformers torch")
+    import warnings
+    warnings.filterwarnings("ignore", message=".*bitsandbytes.*")
 
 # Set tokenizers parallelism to false to avoid warnings
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -86,6 +144,10 @@ def set_quantization_level(level: str = "4bit_aggressive"):
             - "4bit_aggressive": Aggressive 4-bit quantization (maximum compression)
             - "3bit": Experimental 3-bit quantization (extreme compression)
     """
+    if not QUANTIZATION_AVAILABLE and level != "none":
+        print("Quantization not available on this system - falling back to full precision")
+        level = "none"
+    
     config = get_model_config()
     config["quantization"] = level
     save_model_config(config)
@@ -93,8 +155,8 @@ def set_quantization_level(level: str = "4bit_aggressive"):
     # Clear the cached model to force reload with new quantization
     get_model_and_tokenizer.cache_clear()
     
-    print(f"✅ Quantization level set to: {level}")
-    print("🔄 Model cache cleared - next model load will use new quantization settings")
+    print(f"Quantization level set to: {level}")
+    print("Model cache cleared - next model load will use new quantization settings")
     
     # Print compression info
     compression_info = {
@@ -106,7 +168,7 @@ def set_quantization_level(level: str = "4bit_aggressive"):
     }
     
     if level in compression_info:
-        print(f"📊 Expected compression: {compression_info[level]}")
+        print(f"Expected compression: {compression_info[level]}")
     
     return config
 
@@ -129,67 +191,79 @@ def get_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     quantization_type = config.get("quantization", "none")
     quantization_config = None
     
-    if quantization_type == "8bit":
-        quantization_config = BitsAndBytesConfig(
-            load_in_8bit=True,
-            llm_int8_threshold=6.0,
-            llm_int8_has_fp16_weight=False,
-        )
-    elif quantization_type == "4bit":
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",  # NormalFloat4 for better accuracy
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,  # Double quantization for more compression
-            bnb_4bit_quant_storage=torch.uint8,  # More compact storage
-        )
-    elif quantization_type == "4bit_aggressive":
-        # More aggressive 4-bit quantization for maximum compression
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="fp4",  # FP4 for maximum compression
-            bnb_4bit_compute_dtype=torch.bfloat16,  # BFloat16 for efficiency
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_storage=torch.uint8,
-        )
-    elif quantization_type == "3bit":
-        # Experimental 3-bit quantization (if supported)
+    # Only set up quantization if bitsandbytes is available
+    if QUANTIZATION_AVAILABLE and quantization_type != "none":
         try:
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,  # Use 4-bit infrastructure
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_storage=torch.uint8,
-                # Additional compression settings
-            )
-        except Exception:
-            # Fallback to aggressive 4-bit if 3-bit not supported
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="fp4",
-                bnb_4bit_compute_dtype=torch.bfloat16,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_storage=torch.uint8,
-            )
+            if quantization_type == "8bit":
+                quantization_config = BitsAndBytesConfig(
+                    load_in_8bit=True,
+                    llm_int8_threshold=6.0,
+                    llm_int8_has_fp16_weight=False,
+                )
+            elif quantization_type == "4bit":
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",  # NormalFloat4 for better accuracy
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_use_double_quant=True,  # Double quantization for more compression
+                    bnb_4bit_quant_storage=torch.uint8,  # More compact storage
+                )
+            elif quantization_type == "4bit_aggressive":
+                # More aggressive 4-bit quantization for maximum compression
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="fp4",  # FP4 for maximum compression
+                    bnb_4bit_compute_dtype=torch.bfloat16,  # BFloat16 for efficiency
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_storage=torch.uint8,
+                )
+            elif quantization_type == "3bit":
+                # Experimental 3-bit quantization (if supported)
+                try:
+                    quantization_config = BitsAndBytesConfig(
+                        load_in_4bit=True,  # Use 4-bit infrastructure
+                        bnb_4bit_quant_type="nf4",
+                        bnb_4bit_compute_dtype=torch.float16,
+                        bnb_4bit_use_double_quant=True,
+                        bnb_4bit_quant_storage=torch.uint8,
+                        # Additional compression settings
+                    )
+                except Exception:
+                    # Fallback to aggressive 4-bit if 3-bit not supported
+                    quantization_config = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_quant_type="fp4",
+                        bnb_4bit_compute_dtype=torch.bfloat16,
+                        bnb_4bit_use_double_quant=True,
+                        bnb_4bit_quant_storage=torch.uint8,
+                    )
+        except Exception as e:
+            # If quantization setup fails, fall back to no quantization
+            print(f"⚠️  Quantization setup failed: {str(e)}")
+            print("   Falling back to full precision model")
+            quantization_config = None
+    elif not QUANTIZATION_AVAILABLE and quantization_type != "none":
+        print("⚠️  Quantization requested but not available - using full precision")
     
     try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
-            cache_dir=str(cache_dir_models), # cache_dir expects a string
-            trust_remote_code=True,
-            local_files_only=False
-        )
-        
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            cache_dir=str(cache_dir_models), # cache_dir expects a string
-            trust_remote_code=True,
-            local_files_only=False,
-            quantization_config=quantization_config,
-            device_map="auto",
-            torch_dtype=torch.float16 if quantization_config is None else None,
-        )
+        # Suppress stderr during model loading for cleaner output
+        with suppress_stderr():
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_name,
+                cache_dir=str(cache_dir_models), # cache_dir expects a string
+                trust_remote_code=True,
+                local_files_only=False
+            )
+            
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                cache_dir=str(cache_dir_models), # cache_dir expects a string
+                trust_remote_code=True,
+                local_files_only=False,
+                quantization_config=quantization_config,
+                device_map="auto",
+                torch_dtype=torch.float16 if quantization_config is None else None,
+            )
         
         # Set padding token if not set, common for generation
         if tokenizer.pad_token is None:
@@ -199,7 +273,59 @@ def get_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
         return model, tokenizer
         
     except Exception as e:
-        raise ModelLoadError(f"Failed to load model or tokenizer: {str(e)}")
+        error_msg = str(e)
+        if "quantized model" in error_msg or "device_map" in error_msg or "CPU or the disk" in error_msg:
+            # This is a quantization/device mapping issue - try fallback without quantization
+            print("   → Retrying without model optimization...")
+            
+            # Clear the cache and update config to prevent quantization on retry
+            get_model_and_tokenizer.cache_clear()
+            config = get_model_config()
+            config["quantization"] = "none"
+            save_model_config(config)
+            
+            try:
+                with suppress_stderr():
+                    tokenizer = AutoTokenizer.from_pretrained(
+                        model_name,
+                        cache_dir=str(cache_dir_models),
+                        trust_remote_code=True,
+                        local_files_only=False
+                    )
+                    
+                    # Retry without quantization but still try to use GPU if available
+                    model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
+                        cache_dir=str(cache_dir_models),
+                        trust_remote_code=True,
+                        local_files_only=False,
+                        quantization_config=None,  # No quantization
+                        device_map="auto",  # Try to use GPU if available
+                        torch_dtype=torch.float16,  # Keep float16 for better performance
+                        low_cpu_mem_usage=True,  # Memory optimization
+                    )
+                
+                # Set padding token if not set
+                if tokenizer.pad_token is None:
+                    tokenizer.pad_token = tokenizer.eos_token
+                    model.config.pad_token_id = model.config.eos_token_id
+                
+                # Check what device the model ended up on
+                if hasattr(model, 'device'):
+                    device_info = f"on {model.device}"
+                elif hasattr(model, 'hf_device_map'):
+                    devices = set(model.hf_device_map.values()) if model.hf_device_map else {"cpu"}
+                    device_info = f"on {', '.join(map(str, devices))}"
+                else:
+                    device_info = "device auto-selected"
+                
+                print(f"   → Successfully loaded model without quantization ({device_info})")
+                return model, tokenizer
+                
+            except Exception as fallback_error:
+                raise ModelLoadError(f"Failed to load model even in fallback mode: {str(fallback_error)}")
+        else:
+            raise ModelLoadError(f"Failed to load model or tokenizer: {str(e)}")
 
 def _render_prompt(template_name: str, **kwargs) -> str:
     """Renders a Jinja2 prompt template."""
