@@ -17,7 +17,7 @@ from ..models import (
 
 class CppAnalyzer(BaseAnalyzer):
     LANGUAGE_NAME = "cpp"
-    FILE_EXTENSIONS = (".cpp", ".cc", ".cxx", ".c", ".h", ".hpp", ".hxx")
+    FILE_EXTENSIONS = (".cpp", ".cc", ".cxx", ".hpp", ".hxx")  # Removed .c and .h (pure C files)
 
     def _extract_include_path(self, node: Node, source_code: bytes) -> Optional[str]:
         """Extract include path from #include statement."""
