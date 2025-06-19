@@ -20,7 +20,7 @@ from .base import BaseAnalyzer
 from .python_analyzer import PythonAnalyzer
 from .javascript_analyzer import JavaScriptAnalyzer
 from .cpp_analyzer import CppAnalyzer
-from .julia_analyzer import JuliaAnalyzer
+from .julia_analyzer import JuliaAnalyzer 
 
 __all__ = ['BaseAnalyzer', 'PythonAnalyzer', 'JavaScriptAnalyzer', 'CppAnalyzer', 'JuliaAnalyzer']
 

@@ -3,7 +3,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Type, Optional
+from typing import Dict, Type, Optional, List, Union
 
 from .analyzers import BaseAnalyzer
 from .analyzers.python_analyzer import PythonAnalyzer
